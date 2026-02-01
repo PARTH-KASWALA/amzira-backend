@@ -32,4 +32,4 @@ fastapi-mail==1.4.1
 
 # Testing
 pytest==7.4.3
-httpx==0.25.2
+httpx==0.25.2# amzira-backend
