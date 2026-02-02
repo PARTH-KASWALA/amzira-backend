@@ -304,11 +304,11 @@ def update_order_status(
         order = OrderTrackingService.update_order_status(
             db, order_id, status_update, current_user.id
         )
-        return success(data={"order_id": order.id, "status": order.status.value}, message="Order status updated successfully")
-    except HTTPException as e:
-        return error(message=e.detail, errors={"detail": e.detail})
+        return {"order_id": order.id, "status": order.status.value}
+    except HTTPException:
+        raise
     except Exception as e:
-        return error(message="Failed to update order status", errors={"detail": str(e)})
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get("/{order_id}/tracking", response_model=dict)
@@ -322,14 +322,14 @@ def get_order_tracking(
         tracking = OrderTrackingService.get_order_tracking(
             db, order_id, current_user.id, current_user.role.value
         )
-        return success(data=tracking.dict(), message="Order tracking retrieved successfully")
-    except HTTPException as e:
-        return error(message=e.detail, errors={"detail": e.detail})
+        return tracking.dict()
+    except HTTPException:
+        raise
     except Exception as e:
-        return error(message="Failed to retrieve order tracking", errors={"detail": str(e)})
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@router.get("/my/tracking", response_model=dict)
+@router.get("/my/tracking", response_model=List[dict])
 def get_user_orders_tracking(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
@@ -337,8 +337,6 @@ def get_user_orders_tracking(
     """Get tracking information for all user's orders."""
     try:
         tracking_list = OrderTrackingService.get_user_orders_tracking(db, current_user.id)
-        return success(data=[t.dict() for t in tracking_list], message="Order tracking retrieved successfully")
+        return [t.dict() for t in tracking_list]
     except Exception as e:
-        return error(message="Failed to retrieve order tracking", errors={"detail": str(e)})
-    
-    return {"message": "Order cancelled successfully"}
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
