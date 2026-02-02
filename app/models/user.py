@@ -28,3 +28,6 @@ class User(Base):
     addresses = relationship("Address", back_populates="user", cascade="all, delete-orphan")
     cart_items = relationship("CartItem", back_populates="user", cascade="all, delete-orphan")
     orders = relationship("Order", back_populates="user")
+    reviews = relationship("Review", back_populates="user", cascade="all, delete-orphan")
+    wishlist = relationship("Wishlist", back_populates="user", cascade="all, delete-orphan")
+    coupon_usages = relationship("CouponUsage", back_populates="user", cascade="all, delete-orphan")

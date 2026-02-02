@@ -9,6 +9,8 @@ from app.core.security import verify_password, hash_password, create_access_toke
 from app.core.exceptions import EmailAlreadyExists, InvalidCredentials
 from app.core.config import settings
 from fastapi import Request
+from app.core.security import verify_password, get_password_hash
+
 
 
 # Rate limiting for auth endpoints
@@ -42,6 +44,8 @@ def register(request: Request,user_in: UserCreate, db: Session = Depends(get_db)
     user = User(
         email=user_in.email,
         password_hash=hash_password(user_in.password),
+        # password_hash=hash_password(user_in.password),
+        # password=user_in.password,
         full_name=user_in.full_name,
         phone=user_in.phone
     )

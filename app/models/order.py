@@ -27,11 +27,14 @@ class Order(Base):
     tax_amount = Column(Float, default=0.0)
     shipping_charge = Column(Float, default=0.0)
     discount_amount = Column(Float, default=0.0)
+    coupon_code = Column(String(50), nullable=True)
     total_amount = Column(Float, nullable=False)
     
     # Status & Tracking
     status = Column(Enum(OrderStatus), default=OrderStatus.PENDING, nullable=False, index=True)
     tracking_number = Column(String(100), nullable=True)
+    carrier_name = Column(String(100), nullable=True)  # e.g., "FedEx", "UPS", "India Post"
+    estimated_delivery_date = Column(DateTime, nullable=True)
     
     # Address (store IDs for reference)
     shipping_address_id = Column(Integer, ForeignKey("addresses.id"), nullable=False)
@@ -50,6 +53,8 @@ class Order(Base):
     payment = relationship("Payment", back_populates="order", uselist=False)
     shipping_address = relationship("Address", foreign_keys=[shipping_address_id])
     billing_address = relationship("Address", foreign_keys=[billing_address_id])
+    coupon_usages = relationship("CouponUsage", back_populates="order", cascade="all, delete-orphan")
+    status_history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan", order_by="OrderStatusHistory.created_at")
 
 
 class OrderItem(Base):

@@ -13,6 +13,8 @@ from app.core.exceptions import OrderNotFound
 import random
 import string
 from app.models.product import ProductVariant
+from app.services.order_tracking_service import OrderTrackingService
+from app.schemas.order_tracking import OrderStatusUpdate, OrderTrackingResponse
 
 
 router = APIRouter()
@@ -286,5 +288,57 @@ def cancel_order(
         variant.stock_quantity += item.quantity
     
     db.commit()
+
+
+# Order Tracking Endpoints
+
+@router.put("/{order_id}/status", response_model=dict)
+def update_order_status(
+    order_id: int,
+    status_update: OrderStatusUpdate,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Update order status (admin only)."""
+    try:
+        order = OrderTrackingService.update_order_status(
+            db, order_id, status_update, current_user.id
+        )
+        return success(data={"order_id": order.id, "status": order.status.value}, message="Order status updated successfully")
+    except HTTPException as e:
+        return error(message=e.detail, errors={"detail": e.detail})
+    except Exception as e:
+        return error(message="Failed to update order status", errors={"detail": str(e)})
+
+
+@router.get("/{order_id}/tracking", response_model=dict)
+def get_order_tracking(
+    order_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get order tracking information."""
+    try:
+        tracking = OrderTrackingService.get_order_tracking(
+            db, order_id, current_user.id, current_user.role.value
+        )
+        return success(data=tracking.dict(), message="Order tracking retrieved successfully")
+    except HTTPException as e:
+        return error(message=e.detail, errors={"detail": e.detail})
+    except Exception as e:
+        return error(message="Failed to retrieve order tracking", errors={"detail": str(e)})
+
+
+@router.get("/my/tracking", response_model=dict)
+def get_user_orders_tracking(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get tracking information for all user's orders."""
+    try:
+        tracking_list = OrderTrackingService.get_user_orders_tracking(db, current_user.id)
+        return success(data=[t.dict() for t in tracking_list], message="Order tracking retrieved successfully")
+    except Exception as e:
+        return error(message="Failed to retrieve order tracking", errors={"detail": str(e)})
     
     return {"message": "Order cancelled successfully"}

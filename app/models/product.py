@@ -34,6 +34,10 @@ class Product(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     is_featured = Column(Boolean, default=False)
     
+    # Ratings
+    avg_rating = Column(Float, default=0.0, nullable=False)
+    review_count = Column(Integer, default=0, nullable=False)
+    
     # SEO & Metadata
     meta_title = Column(String(100))
     meta_description = Column(String(300))
@@ -51,7 +55,8 @@ class Product(Base):
     images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
     variants = relationship("ProductVariant", back_populates="product", cascade="all, delete-orphan")
     occasions = relationship("Occasion", secondary=product_occasions, back_populates="products")
-
+    reviews = relationship("Review", back_populates="product", cascade="all, delete-orphan")
+    wishlist_items = relationship("Wishlist", back_populates="product", cascade="all, delete-orphan")
 
 # Composite indexes for performance
 Index('idx_product_category_active', Product.category_id, Product.is_active)
