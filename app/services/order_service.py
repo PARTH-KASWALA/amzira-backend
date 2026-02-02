@@ -19,9 +19,5 @@ def auto_cancel_pending_orders(db: Session):
     
     for order in pending_orders:
         order.status = OrderStatus.CANCELLED
-        # Release stock back
-        for item in order.items:
-            variant = item.variant
-            variant.stock_quantity += item.quantity
-    
+    # Stock was never deducted at order creation, so no restoration is necessary.
     db.commit()

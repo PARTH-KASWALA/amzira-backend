@@ -30,6 +30,7 @@ def generate_order_number() -> str:
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
 def create_order(
     order_data: OrderCreate,
+    payment_method: str = "razorpay",
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -129,11 +130,8 @@ def create_order(
         )
         db.add(order_item)
         
-        # Reduce stock
-        variant = db.query(ProductVariant).filter(
-            ProductVariant.id == item_data["variant_id"]
-        ).first()
-        variant.stock_quantity -= item_data["quantity"]
+        # Note: stock deduction is performed during payment confirmation.
+        # Do NOT modify `ProductVariant.stock_quantity` here to avoid overselling.
     
     # Clear cart
     db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
@@ -154,16 +152,30 @@ def create_order(
         for item in order.items
     ]
     
+    # Handle payment method
+    if (payment_method or "").lower() == "cod":
+        from app.services.payment_service import create_cod_payment
+        from app.utils.email import send_order_confirmation_email
+
+        payment = create_cod_payment(order, db)
+        try:
+            send_order_confirmation_email(order)
+        except Exception:
+            # email failures should not block the response
+            pass
+
+        return {
+            "order_number": order.order_number,
+            "payment_method": "cod",
+            "message": "Order placed successfully. Pay on delivery."
+        }
+
+    # Default: razorpay - return order info for frontend to initiate payment
     return {
+        "order_id": order.id,
         "order_number": order.order_number,
-        "id": order.id,
-        "status": order.status.value,
-        "subtotal": order.subtotal,
-        "tax_amount": order.tax_amount,
-        "shipping_charge": order.shipping_charge,
-        "total_amount": order.total_amount,
-        "items": items_response,
-        "created_at": order.created_at
+        "payment_method": "razorpay",
+        "message": "Proceed to payment"
     }
 
 
@@ -280,13 +292,15 @@ def cancel_order(
             detail="Cannot cancel shipped/delivered orders"
         )
     
+    previous_status = order.status
     order.status = OrderStatus.CANCELLED
-    
-    # Restore stock
-    for item in order.items:
-        variant = item.variant
-        variant.stock_quantity += item.quantity
-    
+
+    # Only restore stock if it was previously deducted (i.e., order was CONFIRMED)
+    if previous_status == OrderStatus.CONFIRMED:
+        for item in order.items:
+            variant = item.variant
+            variant.stock_quantity += item.quantity
+
     db.commit()
 
 
@@ -340,3 +354,45 @@ def get_user_orders_tracking(
         return [t.dict() for t in tracking_list]
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    
+
+
+
+
+from fastapi.responses import StreamingResponse
+from app.utils.invoice_generator import generate_gst_invoice
+
+
+@router.get("/orders/{order_number}/invoice")
+def download_invoice(
+    order_number: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    order = (
+        db.query(Order)
+        .filter(
+            Order.order_number == order_number,
+            Order.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.status == OrderStatus.PENDING:
+        raise HTTPException(
+            status_code=400,
+            detail="Invoice not available for pending orders",
+        )
+
+    pdf_buffer = generate_gst_invoice(order)
+
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename=invoice-{order_number}.pdf"
+        },
+    )

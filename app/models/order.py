@@ -55,6 +55,11 @@ class Order(Base):
     billing_address = relationship("Address", foreign_keys=[billing_address_id])
     coupon_usages = relationship("CouponUsage", back_populates="order", cascade="all, delete-orphan")
     status_history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan", order_by="OrderStatusHistory.created_at")
+    returns = relationship(
+        "ReturnRequest",
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
 
 
 class OrderItem(Base):

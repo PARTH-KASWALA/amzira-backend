@@ -38,21 +38,84 @@ def send_email_async(to_email: str, subject: str, body: str, html: Optional[str]
 	thread = Thread(target=_send_email_smtp, args=(msg,), daemon=True)
 	thread.start()
 
+# old code
+# def send_order_confirmation_email(order, to_email: Optional[str] = None) -> None:
+# 	"""Compose and send order confirmation email. Non-blocking and safe.
+
+# 	`order` is expected to have `order_number` and basic details.
+# 	"""
+# 	recipient = to_email or (order.user.email if hasattr(order, 'user') else None)
+# 	if not recipient:
+# 		logger.warning("No recipient for order confirmation: order_id=%s", getattr(order, 'id', None))
+# 		return
+
+# 	subject = f"Order Confirmation - {getattr(order, 'order_number', 'Order') }"
+# 	body = f"Thank you for your order. Your order number is {getattr(order, 'order_number', '')}."
+
+# 	try:
+# 		send_email_async(recipient, subject, body)
+# 	except Exception:
+# 		logger.exception("Unexpected error while queueing order confirmation email")
+
+
+
+# new code
+
+# def send_order_confirmation_email(order, to_email: Optional[str] = None) -> None:
+#     """Send order confirmation with HTML template"""
+#     from app.utils.email_templates import order_confirmation_template
+    
+#     recipient = to_email or (order.user.email if hasattr(order, 'user') else None)
+#     if not recipient:
+#         logger.warning("No recipient for order confirmation: order_id=%s", getattr(order, 'id', None))
+#         return
+
+#     subject = f"Order Confirmed - {getattr(order, 'order_number', 'Order')}"
+#     body = f"Your order {getattr(order, 'order_number', '')} has been confirmed."
+#     html = order_confirmation_template(order, order.user)
+
+#     try:
+#         send_email_async(recipient, subject, body, html)
+#     except Exception:
+#         logger.exception("Failed to queue order confirmation email")
+
+
+
+
+
+
+
+from typing import Optional
+from app.utils.email_templates import order_confirmation_template
+from app.utils.email import send_email_async
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def send_order_confirmation_email(order, to_email: Optional[str] = None) -> None:
-	"""Compose and send order confirmation email. Non-blocking and safe.
+    """Send order confirmation email using HTML template (non-blocking)."""
 
-	`order` is expected to have `order_number` and basic details.
-	"""
-	recipient = to_email or (order.user.email if hasattr(order, 'user') else None)
-	if not recipient:
-		logger.warning("No recipient for order confirmation: order_id=%s", getattr(order, 'id', None))
-		return
+    user = getattr(order, "user", None)
+    recipient = to_email or (user.email if user else None)
 
-	subject = f"Order Confirmation - {getattr(order, 'order_number', 'Order') }"
-	body = f"Thank you for your order. Your order number is {getattr(order, 'order_number', '')}."
+    if not recipient:
+        logger.warning(
+            "No recipient for order confirmation: order_id=%s",
+            getattr(order, "id", None),
+        )
+        return
 
-	try:
-		send_email_async(recipient, subject, body)
-	except Exception:
-		logger.exception("Unexpected error while queueing order confirmation email")
+    subject = f"Order Confirmed - {getattr(order, 'order_number', 'Order')}"
+    body = f"Your order {getattr(order, 'order_number', '')} has been confirmed."
+
+    if not user:
+        logger.warning("Order has no user attached: order_id=%s", getattr(order, "id", None))
+        return
+
+    html = order_confirmation_template(order, user)
+
+    try:
+        send_email_async(recipient, subject, body, html)
+    except Exception:
+        logger.exception("Failed to queue order confirmation email")

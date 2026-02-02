@@ -10,8 +10,11 @@ from app.models.user import User
 from app.models.order import Order, OrderStatus
 from app.models.payment import Payment, PaymentStatus, PaymentMethod
 from app.core.config import settings
+import structlog
 
 router = APIRouter()
+
+logger = structlog.get_logger()
 
 # Initialize Razorpay client
 razorpay_client = razorpay.Client(
@@ -98,6 +101,18 @@ def verify_payment(
     ).hexdigest()
     
     if not hmac.compare_digest(generated_signature, razorpay_signature):
+        # Log security event for failed signature verification
+        try:
+            logger.warning(
+                "payment_signature_mismatch",
+                order_id=razorpay_order_id,
+                payment_id=razorpay_payment_id,
+                user_id=current_user.id,
+            )
+        except Exception:
+            # Ensure logging failures do not block flow
+            pass
+
         payment.payment_status = PaymentStatus.FAILED
         db.commit()
         raise HTTPException(status_code=400, detail="Invalid payment signature")
@@ -137,6 +152,11 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
             settings.RAZORPAY_WEBHOOK_SECRET
         )
     except:
+        # Log webhook verification failure
+        try:
+            logger.warning("webhook_signature_invalid")
+        except Exception:
+            pass
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
     
     # Process webhook event

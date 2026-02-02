@@ -2,11 +2,12 @@ import razorpay
 import hmac
 import hashlib
 from app.core.config import settings
-from app.models.payment import Payment, PaymentStatus
+from app.models.payment import Payment, PaymentStatus, PaymentMethod
 from app.models.order import Order, OrderStatus
 from app.models.product import ProductVariant
 from app.utils.email import send_order_confirmation_email
 import logging
+from datetime import datetime
 from sqlalchemy.orm import Session
 
 # Initialize Razorpay client
@@ -45,6 +46,27 @@ def create_razorpay_order(order: Order, db: Session) -> dict:
         "order_number": order.order_number
     }
 
+
+def create_cod_payment(order: Order, db: Session) -> Payment:
+    """Create COD payment record"""
+    payment = Payment(
+        order_id=order.id,
+        payment_method=PaymentMethod.COD,
+        payment_status=PaymentStatus.PENDING,  # Will be SUCCESS on delivery
+        amount=order.total_amount,
+        currency="INR"
+    )
+
+    db.add(payment)
+
+    # For COD, immediately confirm order but payment stays pending
+    order.status = OrderStatus.CONFIRMED
+
+    db.commit()
+    db.refresh(payment)
+
+    return payment
+
 def verify_payment_signature(
     razorpay_order_id: str,
     razorpay_payment_id: str,
@@ -60,6 +82,8 @@ def verify_payment_signature(
     ).hexdigest()
     
     return hmac.compare_digest(generated_signature, razorpay_signature)
+
+
 
 def process_successful_payment(
     razorpay_order_id: str,
@@ -84,8 +108,8 @@ def process_successful_payment(
     
     # Begin critical section: lock variants and deduct stock
     try:
+        # First, lock and validate all variants to ensure sufficient stock
         for item in payment.order.items:
-            # Lock the variant row for update to prevent races
             variant = db.query(ProductVariant).filter(ProductVariant.id == item.variant_id).with_for_update().first()
             if not variant:
                 payment.payment_status = PaymentStatus.FAILED
@@ -97,6 +121,10 @@ def process_successful_payment(
                 db.commit()
                 raise ValueError("Insufficient stock for variant")
 
+        # All checks passed: deduct stock
+        for item in payment.order.items:
+            variant = db.query(ProductVariant).filter(ProductVariant.id == item.variant_id).with_for_update().first()
+            # variant should exist and have sufficient stock from previous loop
             variant.stock_quantity -= item.quantity
 
         # Update payment and order after successful stock deduction

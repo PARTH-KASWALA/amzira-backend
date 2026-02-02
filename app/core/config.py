@@ -55,3 +55,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+
+# app/core/config.py
+ADMIN_ALLOWED_IPS: List[str] = ["103.x.x.x"]  # Office IP

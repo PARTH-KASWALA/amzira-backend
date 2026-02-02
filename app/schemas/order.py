@@ -1,6 +1,8 @@
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
+from uuid import UUID
+from app.models.payment import PaymentMethod
 
 
 class OrderItemResponse(BaseModel):
@@ -36,3 +38,10 @@ class OrderResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+
+
+class OrderCreate(BaseModel):
+    address_id: UUID
+    payment_method: PaymentMethod = PaymentMethod.RAZORPAY

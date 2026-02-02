@@ -7,6 +7,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import time
+from app.core.logging import configure_logging
+
 
 from app.core.config import settings
 from app.api.v1 import auth, products, cart, orders, users, payments, admin, reviews, wishlist, coupons
@@ -111,3 +113,93 @@ async def global_exception_handler(request: Request, exc: Exception):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"detail": "Internal server error"}
         )
+    
+
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from app.core.config import settings
+
+sentry_sdk.init(
+    dsn=settings.SENTRY_DSN,
+    integrations=[FastApiIntegration()],
+    traces_sample_rate=0.2,
+)
+
+
+
+
+
+
+
+
+
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+from slowapi.middleware import SlowAPIMiddleware
+
+
+# --------------------------------------------------
+# CONFIGURE LOGGING (FIRST)
+# --------------------------------------------------
+configure_logging()
+
+# --------------------------------------------------
+# INITIALIZE SENTRY (ONLY IN PRODUCTION)
+# --------------------------------------------------
+if settings.ENVIRONMENT == "production" and settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENVIRONMENT,
+        traces_sample_rate=0.1,
+        integrations=[
+            FastApiIntegration(),
+            SqlalchemyIntegration(),
+        ],
+    )
+
+# --------------------------------------------------
+# CREATE APP
+# --------------------------------------------------
+app = FastAPI(title="AMZIRA API")
+
+# --------------------------------------------------
+# RATE LIMITER SETUP (GLOBAL)
+# --------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+app.add_middleware(SlowAPIMiddleware)
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many requests. Please try again later."},
+    )
+
+# --------------------------------------------------
+# REQUEST LOGGING MIDDLEWARE
+# --------------------------------------------------
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    import structlog
+
+    logger = structlog.get_logger()
+
+    logger.info(
+        "request_started",
+        method=request.method,
+        path=request.url.path,
+        client_ip=request.client.host if request.client else None,
+    )
+
+    response = await call_next(request)
+
+    logger.info(
+        "request_completed",
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+    )
+
+    return response

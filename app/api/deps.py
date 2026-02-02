@@ -46,13 +46,77 @@ def get_current_active_user(
     return current_user
 
 
+# def require_admin(
+#     current_user: User = Depends(get_current_user)
+# ) -> User:
+#     """Require admin role"""
+#     if current_user.role != UserRole.ADMIN:
+#         raise HTTPException(
+#             status_code=status.HTTP_403_FORBIDDEN,
+#             detail="Admin access required"
+#         )
+#     return current_user
+
+
+
+
+
+from fastapi import Depends, HTTPException, Request
+import structlog
+
+from app.core.config import settings
+from app.models.user import User, UserRole
+from app.api.deps import get_current_user
+
+logger = structlog.get_logger()
+
+
+# app/api/deps.py
+# def require_admin(
+#     request: Request,
+#     current_user: User = Depends(get_current_user)
+# ) -> User:
+#     if current_user.role != UserRole.ADMIN:
+#         raise HTTPException(status_code=403, detail="Admin access required")
+    
+#     # IP whitelist in production
+#     if settings.ENVIRONMENT == "production":
+#         client_ip = request.client.host
+#         if client_ip not in settings.ADMIN_ALLOWED_IPS:
+#             logger.warning("admin_access_denied", ip=client_ip, user=current_user.email)
+#             raise HTTPException(status_code=403, detail="Access denied")
+    
+#     return current_user
+
+
 def require_admin(
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    current_user: User = Depends(get_current_user),
 ) -> User:
-    """Require admin role"""
+    """
+    Dependency to ensure the user is an admin.
+    In production, also enforces IP whitelist.
+    """
+
     if current_user.role != UserRole.ADMIN:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required"
+            status_code=403,
+            detail="Admin access required",
         )
+
+    # IP whitelist in production
+    if settings.ENVIRONMENT == "production":
+        client_ip = request.client.host if request.client else None
+
+        if client_ip not in settings.ADMIN_ALLOWED_IPS:
+            logger.warning(
+                "admin_access_denied",
+                ip=client_ip,
+                user_email=current_user.email,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied",
+            )
+
     return current_user
