@@ -8,6 +8,7 @@ from app.models.cart import CartItem
 from app.models.product import Product, ProductVariant
 from app.schemas.cart import CartItemCreate, CartItemUpdate, CartResponse
 from app.core.exceptions import ProductNotFound, InsufficientStock
+from app.utils.response import success
 
 router = APIRouter()
 
@@ -57,12 +58,13 @@ def get_cart(
             "stock_available": variant.stock_quantity
         })
     
-    return {
+    return success(
+    data={
         "items": items_response,
         "subtotal": subtotal,
-        "total_items": len(cart_items)
+        "total_items": len(cart_items),
     }
-
+)
 
 @router.post("/items", status_code=status.HTTP_201_CREATED)
 def add_to_cart(
@@ -70,7 +72,7 @@ def add_to_cart(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Add item to cart"""
+    """Add item to cart (authenticated users only)"""
     # Verify product exists
     product = db.query(Product).filter(
         Product.id == cart_item.product_id,
@@ -114,7 +116,10 @@ def add_to_cart(
         db.commit()
         db.refresh(existing_item)
         
-        return {"message": "Cart updated", "cart_item_id": existing_item.id}
+        return success(
+            data={"cart_item_id": existing_item.id},
+            message="Cart updated",
+        )
     
     # Calculate price
     price = product.sale_price if product.sale_price else product.base_price
@@ -133,7 +138,10 @@ def add_to_cart(
     db.commit()
     db.refresh(new_cart_item)
     
-    return {"message": "Item added to cart", "cart_item_id": new_cart_item.id}
+    return success(
+        data={"cart_item_id": new_cart_item.id},
+        message="Item added to cart",
+    )
 
 
 @router.put("/items/{item_id}")
@@ -163,7 +171,7 @@ def update_cart_item(
     cart_item.quantity = update_data.quantity
     db.commit()
     
-    return {"message": "Cart item updated"}
+    return success(message="Cart item updated")
 
 
 @router.delete("/items/{item_id}")
@@ -187,7 +195,7 @@ def remove_from_cart(
     db.delete(cart_item)
     db.commit()
     
-    return {"message": "Item removed from cart"}
+    return success(message="Item removed from cart")
 
 
 @router.delete("/")
@@ -199,4 +207,5 @@ def clear_cart(
     db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
     db.commit()
     
-    return {"message": "Cart cleared"}
+    return success(message="Cart cleared")
+

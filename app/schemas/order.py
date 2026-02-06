@@ -1,8 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import List, Optional
 from datetime import datetime
-from uuid import UUID
-from app.models.payment import PaymentMethod
 
 
 class OrderItemResponse(BaseModel):
@@ -23,6 +21,18 @@ class OrderCreate(BaseModel):
     payment_method: str = "razorpay"
     customer_notes: Optional[str] = None
 
+    @validator("customer_notes")
+    def validate_notes(cls, value):
+        if value and len(value) > 500:
+            raise ValueError("Notes too long (max 500 chars)")
+        return value
+
+    @validator("shipping_address_id", "billing_address_id")
+    def validate_address_ids(cls, value):
+        if value <= 0:
+            raise ValueError("Invalid address ID")
+        return value
+
 
 class OrderResponse(BaseModel):
     id: int
@@ -38,10 +48,3 @@ class OrderResponse(BaseModel):
     
     class Config:
         from_attributes = True
-
-
-
-
-class OrderCreate(BaseModel):
-    address_id: UUID
-    payment_method: PaymentMethod = PaymentMethod.RAZORPAY

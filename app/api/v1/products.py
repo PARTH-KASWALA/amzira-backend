@@ -7,15 +7,16 @@ from app.models.product import Product, ProductImage, ProductVariant, Occasion
 from app.models.category import Category, Subcategory
 from app.schemas.product import ProductListResponse, ProductDetailResponse, CategoryResponse
 from app.core.exceptions import ProductNotFound
+from app.utils.response import success
 
 router = APIRouter()
 
 
-@router.get("/categories", response_model=List[CategoryResponse])
+@router.get("/categories", response_model=dict)
 def get_categories(db: Session = Depends(get_db)):
     """Get all active categories"""
     categories = db.query(Category).filter(Category.is_active == True).order_by(Category.display_order).all()
-    return categories
+    return success(data=categories, message="Categories retrieved")
 
 
 @router.get("/", response_model=dict)
@@ -127,13 +128,16 @@ def get_products(
             "in_stock": in_stock
         })
     
-    return {
-        "total": total,
-        "page": page,
-        "limit": limit,
-        "total_pages": (total + limit - 1) // limit,
-        "products": products_list
-    }
+    return success(
+        data={
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": (total + limit - 1) // limit,
+            "products": products_list,
+        },
+        message="Products retrieved",
+    )
 
 
 @router.get("/{slug}", response_model=dict)
@@ -191,29 +195,32 @@ def get_product_detail(slug: str, db: Session = Depends(get_db)):
         for occ in product.occasions
     ]
     
-    return {
-        "id": product.id,
-        "name": product.name,
-        "slug": product.slug,
-        "description": product.description,
-        "base_price": product.base_price,
-        "sale_price": product.sale_price,
-        "discount_percentage": product.discount_percentage,
-        "is_featured": product.is_featured,
-        "fabric": product.fabric,
-        "care_instructions": product.care_instructions,
-        "category": {
-            "id": product.category.id,
-            "name": product.category.name,
-            "slug": product.category.slug
+    return success(
+        data={
+            "id": product.id,
+            "name": product.name,
+            "slug": product.slug,
+            "description": product.description,
+            "base_price": product.base_price,
+            "sale_price": product.sale_price,
+            "discount_percentage": product.discount_percentage,
+            "is_featured": product.is_featured,
+            "fabric": product.fabric,
+            "care_instructions": product.care_instructions,
+            "category": {
+                "id": product.category.id,
+                "name": product.category.name,
+                "slug": product.category.slug,
+            },
+            "primary_image": primary_image,
+            "in_stock": in_stock,
+            "images": images,
+            "variants": variants,
+            "occasions": occasions,
+            "created_at": product.created_at,
         },
-        "primary_image": primary_image,
-        "in_stock": in_stock,
-        "images": images,
-        "variants": variants,
-        "occasions": occasions,
-        "created_at": product.created_at
-    }
+        message="Product retrieved",
+    )
 
 
 @router.get("/category/{category_slug}")

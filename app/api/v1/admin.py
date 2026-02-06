@@ -10,6 +10,7 @@ from app.models.category import Category, Subcategory
 from app.models.order import Order, OrderStatus
 from app.schemas.product import ProductCreate
 from app.utils.image_upload import save_product_image, delete_product_image
+from app.utils.response import success
 
 router = APIRouter()
 
@@ -86,11 +87,10 @@ def create_product(
     db.commit()
     db.refresh(product)
     
-    return {
-        "message": "Product created successfully",
-        "product_id": product.id,
-        "slug": product.slug
-    }
+    return success(
+        data={"product_id": product.id, "slug": product.slug},
+        message="Product created successfully",
+    )
 
 
 @router.put("/products/{product_id}")
@@ -139,7 +139,7 @@ def update_product(
     
     db.commit()
     
-    return {"message": "Product updated successfully"}
+    return success(message="Product updated successfully")
 
 
 @router.delete("/products/{product_id}")
@@ -158,7 +158,7 @@ def delete_product(
     product.is_active = False
     db.commit()
     
-    return {"message": "Product deleted successfully"}
+    return success(message="Product deleted successfully")
 
 
 @router.post("/products/{product_id}/images")
@@ -192,7 +192,7 @@ async def add_product_images(
     
     db.commit()
     
-    return {"message": f"{len(images)} images added successfully"}
+    return success(message=f"{len(images)} images added successfully")
 
 
 @router.delete("/products/images/{image_id}")
@@ -214,7 +214,7 @@ def delete_product_image_endpoint(
     db.delete(image)
     db.commit()
     
-    return {"message": "Image deleted successfully"}
+    return success(message="Image deleted successfully")
 
 
 # ============= VARIANT MANAGEMENT =============
@@ -257,7 +257,7 @@ def add_product_variant(
     
     db.commit()
     
-    return {"message": "Variant added successfully", "sku": sku}
+    return success(data={"sku": sku}, message="Variant added successfully")
 
 
 @router.put("/variants/{variant_id}")
@@ -281,7 +281,7 @@ def update_variant_stock(
     
     db.commit()
     
-    return {"message": "Stock updated successfully"}
+    return success(message="Stock updated successfully")
 
 
 # ============= ORDER MANAGEMENT =============
@@ -317,12 +317,15 @@ def get_all_orders(
             "tracking_number": order.tracking_number
         })
     
-    return {
-        "total": total,
-        "page": page,
-        "limit": limit,
-        "orders": orders_response
-    }
+    return success(
+        data={
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "orders": orders_response,
+        },
+        message="Orders retrieved successfully",
+    )
 
 
 @router.get("/orders/{order_id}")
@@ -348,38 +351,41 @@ def get_order_detail_admin(
         for item in order.items
     ]
     
-    return {
-        "id": order.id,
-        "order_number": order.order_number,
-        "customer": {
-            "name": order.user.full_name,
-            "email": order.user.email,
-            "phone": order.user.phone
+    return success(
+        data={
+            "id": order.id,
+            "order_number": order.order_number,
+            "customer": {
+                "name": order.user.full_name,
+                "email": order.user.email,
+                "phone": order.user.phone,
+            },
+            "status": order.status.value,
+            "subtotal": order.subtotal,
+            "tax_amount": order.tax_amount,
+            "shipping_charge": order.shipping_charge,
+            "total_amount": order.total_amount,
+            "items": items,
+            "shipping_address": {
+                "full_name": order.shipping_address.full_name,
+                "phone": order.shipping_address.phone,
+                "address_line1": order.shipping_address.address_line1,
+                "address_line2": order.shipping_address.address_line2,
+                "city": order.shipping_address.city,
+                "state": order.shipping_address.state,
+                "pincode": order.shipping_address.pincode,
+            },
+            "payment": {
+                "method": order.payment.payment_method.value if order.payment else None,
+                "status": order.payment.payment_status.value if order.payment else None,
+            },
+            "customer_notes": order.customer_notes,
+            "admin_notes": order.admin_notes,
+            "tracking_number": order.tracking_number,
+            "created_at": order.created_at,
         },
-        "status": order.status.value,
-        "subtotal": order.subtotal,
-        "tax_amount": order.tax_amount,
-        "shipping_charge": order.shipping_charge,
-        "total_amount": order.total_amount,
-        "items": items,
-        "shipping_address": {
-            "full_name": order.shipping_address.full_name,
-            "phone": order.shipping_address.phone,
-            "address_line1": order.shipping_address.address_line1,
-            "address_line2": order.shipping_address.address_line2,
-            "city": order.shipping_address.city,
-            "state": order.shipping_address.state,
-            "pincode": order.shipping_address.pincode
-        },
-        "payment": {
-            "method": order.payment.payment_method.value if order.payment else None,
-            "status": order.payment.payment_status.value if order.payment else None
-        },
-        "customer_notes": order.customer_notes,
-        "admin_notes": order.admin_notes,
-        "tracking_number": order.tracking_number,
-        "created_at": order.created_at
-    }
+        message="Order details retrieved successfully",
+    )
 
 
 @router.put("/orders/{order_id}/status")
@@ -413,7 +419,7 @@ def update_order_status(
     
     # TODO: Send email notification to customer
     
-    return {"message": "Order status updated successfully"}
+    return success(message="Order status updated successfully")
 
 
 # ============= CATEGORY MANAGEMENT =============
@@ -442,7 +448,7 @@ def create_category(
     db.add(category)
     db.commit()
     
-    return {"message": "Category created", "id": category.id}
+    return success(data={"id": category.id}, message="Category created")
 
 
 @router.post("/occasions")
@@ -463,7 +469,7 @@ def create_occasion(
     db.add(occasion)
     db.commit()
     
-    return {"message": "Occasion created", "id": occasion.id}
+    return success(data={"id": occasion.id}, message="Occasion created")
 
 
 # ============= ANALYTICS =============
@@ -517,14 +523,147 @@ def get_analytics(
         func.sum(OrderItem.quantity).label('total_sold')
     ).group_by(OrderItem.product_name).order_by(func.sum(OrderItem.quantity).desc()).limit(5).all()
     
-    return {
-        "total_orders": total_orders,
-        "pending_orders": pending_orders,
-        "total_revenue": total_revenue,
-        "today_revenue": today_revenue,
-        "week_revenue": week_revenue,
-        "month_revenue": month_revenue,
-        "top_products": [
-            {"name": p[0], "sold": p[1]} for p in top_products
-        ]
-    }
+    return success(
+        data={
+            "total_orders": total_orders,
+            "pending_orders": pending_orders,
+            "total_revenue": total_revenue,
+            "today_revenue": today_revenue,
+            "week_revenue": week_revenue,
+            "month_revenue": month_revenue,
+            "top_products": [{"name": p[0], "sold": p[1]} for p in top_products],
+        },
+        message="Analytics retrieved successfully",
+    )
+
+
+
+
+
+# app/api/v1/admin.py
+
+@router.post("/products/bulk-upload")
+async def bulk_upload_products(
+    file: UploadFile = File(...),
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin: Bulk upload products from CSV"""
+    import csv
+    from io import StringIO
+    
+    content = await file.read()
+    csv_data = StringIO(content.decode('utf-8'))
+    reader = csv.DictReader(csv_data)
+    
+    created = []
+    errors = []
+    
+    for row in reader:
+        try:
+            # Validate required fields
+            required = ['name', 'category_id', 'base_price']
+            missing = [f for f in required if not row.get(f)]
+            if missing:
+                errors.append(f"Row {reader.line_num}: Missing {missing}")
+                continue
+            
+            # Create product
+            slug = slugify(row['name'])
+            product = Product(
+                name=row['name'],
+                slug=slug,
+                category_id=int(row['category_id']),
+                base_price=float(row['base_price']),
+                sale_price=float(row['sale_price']) if row.get('sale_price') else None,
+                description=row.get('description'),
+                fabric=row.get('fabric'),
+                is_featured=row.get('is_featured', '').lower() == 'true'
+            )
+            db.add(product)
+            db.flush()
+            
+            # Add variants if provided
+            if row.get('sizes'):
+                sizes = row['sizes'].split(',')
+                for size in sizes:
+                    variant = ProductVariant(
+                        product_id=product.id,
+                        size=size.strip(),
+                        sku=f"{slug}-{size.strip()}".upper(),
+                        stock_quantity=int(row.get('stock', 0))
+                    )
+                    db.add(variant)
+            
+            created.append(product.name)
+            
+        except Exception as e:
+            errors.append(f"Row {reader.line_num}: {str(e)}")
+    
+    db.commit()
+    
+    return success(
+        data={
+            "created_count": len(created),
+            "error_count": len(errors),
+            "created": created[:10],
+            "errors": errors[:10],
+        },
+        message="Bulk upload completed",
+    )
+
+
+@router.get("/orders/export")
+def export_orders(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    status: Optional[str] = None,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin: Export orders to CSV"""
+    import csv
+    from io import StringIO
+    from fastapi.responses import StreamingResponse
+    
+    query = db.query(Order)
+    
+    if start_date:
+        query = query.filter(Order.created_at >= start_date)
+    if end_date:
+        query = query.filter(Order.created_at <= end_date)
+    if status:
+        query = query.filter(Order.status == status)
+    
+    orders = query.all()
+    
+    output = StringIO()
+    writer = csv.writer(output)
+    
+    # Header
+    writer.writerow([
+        'Order Number', 'Date', 'Customer', 'Email', 'Status',
+        'Items', 'Total', 'Payment Method', 'Tracking'
+    ])
+    
+    # Data
+    for order in orders:
+        writer.writerow([
+            order.order_number,
+            order.created_at.strftime('%Y-%m-%d %H:%M'),
+            order.user.full_name,
+            order.user.email,
+            order.status.value,
+            len(order.items),
+            order.total_amount,
+            order.payment.payment_method.value if order.payment else '',
+            order.tracking_number or ''
+        ])
+    
+    output.seek(0)
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=orders_export.csv"}
+    )

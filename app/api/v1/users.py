@@ -7,17 +7,18 @@ from app.models.user import User
 from app.models.address import Address
 from app.schemas.user import UserResponse, UserUpdate
 from app.schemas.address import AddressCreate, AddressResponse, AddressUpdate
+from app.utils.response import success
 
 router = APIRouter()
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me", response_model=dict)
 def get_current_user_profile(current_user: User = Depends(get_current_active_user)):
     """Get current user profile"""
-    return current_user
+    return success(data=current_user, message="User profile retrieved")
 
 
-@router.put("/me", response_model=UserResponse)
+@router.put("/me", response_model=dict)
 def update_user_profile(
     user_update: UserUpdate,
     current_user: User = Depends(get_current_active_user),
@@ -45,22 +46,22 @@ def update_user_profile(
     db.commit()
     db.refresh(current_user)
     
-    return current_user
+    return success(data=current_user, message="User profile updated")
 
 
 # ============= ADDRESSES =============
 
-@router.get("/me/addresses", response_model=List[AddressResponse])
+@router.get("/me/addresses", response_model=dict)
 def get_user_addresses(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Get user's addresses"""
     addresses = db.query(Address).filter(Address.user_id == current_user.id).all()
-    return addresses
+    return success(data=addresses, message="Addresses retrieved")
 
 
-@router.post("/me/addresses", response_model=AddressResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/me/addresses", response_model=dict, status_code=status.HTTP_201_CREATED)
 def create_address(
     address_data: AddressCreate,
     current_user: User = Depends(get_current_active_user),
@@ -83,10 +84,10 @@ def create_address(
     db.commit()
     db.refresh(address)
     
-    return address
+    return success(data=address, message="Address created")
 
 
-@router.put("/me/addresses/{address_id}", response_model=AddressResponse)
+@router.put("/me/addresses/{address_id}", response_model=dict)
 def update_address(
     address_id: int,
     address_update: AddressUpdate,
@@ -121,7 +122,7 @@ def update_address(
     db.commit()
     db.refresh(address)
     
-    return address
+    return success(data=address, message="Address updated")
 
 
 @router.delete("/me/addresses/{address_id}")
@@ -145,4 +146,4 @@ def delete_address(
     db.delete(address)
     db.commit()
     
-    return {"message": "Address deleted"}
+    return success(message="Address deleted")

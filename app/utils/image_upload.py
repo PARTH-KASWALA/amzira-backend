@@ -103,3 +103,8 @@ def delete_product_image(image_path: str):
             os.remove(path)
     except Exception:
         logger.exception("Error deleting image: %s", image_path)
+
+
+
+
+

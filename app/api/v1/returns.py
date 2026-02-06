@@ -14,6 +14,7 @@ from app.models.product import ProductVariant
 from app.models.return_request import ReturnRequest, ReturnStatus
 
 from app.schemas.return_request import ReturnRequestCreate
+from app.utils.response import success
 
 router = APIRouter(prefix="/returns", tags=["Returns"])
 
@@ -76,7 +77,10 @@ def create_return_request(
     db.add(return_request)
     db.commit()
     
-    return {"message": "Return request submitted", "request_id": return_request.id}
+    return success(
+        data={"request_id": return_request.id},
+        message="Return request submitted",
+    )
 
 @router.put("/{return_id}/approve")
 def approve_return(
@@ -95,7 +99,7 @@ def approve_return(
     
     db.commit()
     
-    return {"message": "Return approved"}
+    return success(message="Return approved")
 
 @router.put("/{return_id}/refund")
 def process_refund(
@@ -124,4 +128,4 @@ def process_refund(
     
     db.commit()
     
-    return {"message": "Refund processed"}
+    return success(message="Refund processed")

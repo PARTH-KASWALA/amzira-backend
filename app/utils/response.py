@@ -1,42 +1,53 @@
-# app/utils/response.py
+from fastapi.responses import JSONResponse
+from typing import Any, Optional, Dict
 
-def success(data=None, message="Success"):
-    return {
+
+def success(
+    data: Optional[Any] = None,
+    message: str = "Success",
+    meta: Optional[Dict] = None,
+):
+    response = {
         "success": True,
-        "data": data,
         "message": message,
-        "errors": None
+        "data": data,
+        "errors": None,
     }
 
-# def error(message="Error", errors=None):
-#     return {
-#         "success": False,
-#         "data": None,
-#         "message": message,
-#         "errors": errors
-#     }
+    if meta is not None:
+        response["meta"] = meta
+
+    return response
 
 
-def error(message="Error", errors=None, status_code=400):
+def error(
+    message: str = "Error",
+    errors: Optional[Any] = None,
+    status_code: int = 400,
+):
     return JSONResponse(
         status_code=status_code,
         content={
             "success": False,
-            "data": None,
             "message": message,
-            "errors": errors
-        }
+            "data": None,
+            "errors": errors,
+        },
     )
 
 
-# Pagination meta
-def paginated_response(items, total, page, limit):
+def paginated_response(
+    items,
+    total: int,
+    page: int,
+    limit: int,
+):
     return success(
         data=items,
         meta={
             "total": total,
             "page": page,
             "limit": limit,
-            "total_pages": (total + limit - 1) // limit
-        }
+            "total_pages": (total + limit - 1) // limit,
+        },
     )

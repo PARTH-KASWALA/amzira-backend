@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from fastapi import HTTPException, status
 from typing import List, Optional
+from datetime import datetime
 
 from app.models.order import Order, OrderStatus
 from app.models.order_status_history import OrderStatusHistory
@@ -27,7 +28,7 @@ class OrderTrackingService:
                 detail="Order not found"
             )
         
-        old_status = order.status.value
+        old_status = order.status.value if isinstance(order.status, OrderStatus) else str(order.status)
         
         # Update order fields
         order.status = status_update.status
@@ -44,7 +45,8 @@ class OrderTrackingService:
             old_status=old_status,
             new_status=status_update.status.value,
             changed_by=changed_by,
-            notes=status_update.notes
+            notes=status_update.notes,
+            created_at=datetime.utcnow(),
         )
         
         db.add(history_entry)

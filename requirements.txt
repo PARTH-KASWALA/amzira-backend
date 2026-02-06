@@ -59,3 +59,24 @@ reportlab==4.0.8
 
 structlog==24.1.0
 sentry-sdk[fastapi]==1.40.0
+
+
+
+
+
+
+# Email Task Queue Dependencies
+celery[redis]==5.3.4
+redis==5.0.1
+
+# Existing dependencies (add these if not already in your requirements.txt)
+# fastapi
+# uvicorn
+# sqlalchemy
+# pydantic
+# pydantic-settings
+# razorpay
+# python-jose[cryptography]
+# passlib[bcrypt]
+# slowapi
+# structlog

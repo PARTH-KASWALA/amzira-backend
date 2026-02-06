@@ -10,6 +10,7 @@ from app.models.user import User
 from app.models.order import Order, OrderStatus
 from app.models.payment import Payment, PaymentStatus, PaymentMethod
 from app.core.config import settings
+from app.utils.response import success
 import structlog
 
 router = APIRouter()
@@ -20,6 +21,18 @@ logger = structlog.get_logger()
 razorpay_client = razorpay.Client(
     auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
 )
+
+def _cancel_order_and_restore_stock(order: Order) -> None:
+    """Cancel a reserved order and restore stock once."""
+    if order.status == OrderStatus.CANCELLED:
+        return
+
+    if order.status in {OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PROCESSING}:
+        for item in order.items:
+            variant = item.variant
+            variant.stock_quantity += item.quantity
+
+    order.status = OrderStatus.CANCELLED
 
 
 @router.post("/create-order")
@@ -62,13 +75,16 @@ def create_payment_order(
     db.add(payment)
     db.commit()
     
-    return {
-        "razorpay_order_id": razorpay_order["id"],
-        "razorpay_key_id": settings.RAZORPAY_KEY_ID,
-        "amount": amount_paise,
-        "currency": "INR",
-        "order_number": order.order_number
-    }
+    return success(
+        data={
+            "razorpay_order_id": razorpay_order["id"],
+            "razorpay_key_id": settings.RAZORPAY_KEY_ID,
+            "amount": amount_paise,
+            "currency": "INR",
+            "order_number": order.order_number,
+        },
+        message="Payment order created",
+    )
 
 
 @router.post("/verify")
@@ -114,6 +130,7 @@ def verify_payment(
             pass
 
         payment.payment_status = PaymentStatus.FAILED
+        _cancel_order_and_restore_stock(payment.order)
         db.commit()
         raise HTTPException(status_code=400, detail="Invalid payment signature")
     
@@ -131,11 +148,10 @@ def verify_payment(
     
     # TODO: Send confirmation email
     
-    return {
-        "success": True,
-        "order_number": order.order_number,
-        "message": "Payment successful"
-    }
+    return success(
+        data={"order_number": order.order_number},
+        message="Payment successful",
+    )
 
 
 @router.post("/webhook")
@@ -195,6 +211,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         
         if payment:
             payment.payment_status = PaymentStatus.FAILED
+            _cancel_order_and_restore_stock(payment.order)
             db.commit()
     
-    return {"status": "ok"}
+    return success(data={"status": "ok"}, message="Webhook processed")

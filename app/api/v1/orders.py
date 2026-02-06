@@ -15,16 +15,28 @@ import string
 from app.models.product import ProductVariant
 from app.services.order_tracking_service import OrderTrackingService
 from app.schemas.order_tracking import OrderStatusUpdate, OrderTrackingResponse
+from app.utils.response import success
 
 
 router = APIRouter()
 
 
-def generate_order_number() -> str:
-    """Generate unique order number"""
-    timestamp = datetime.now().strftime("%Y%m%d")
-    random_part = ''.join(random.choices(string.digits, k=6))
-    return f"AMZ{timestamp}{random_part}"
+def generate_order_number(db: Session) -> str:
+    """Generate a unique order number with bounded retries."""
+    max_attempts = 10
+
+    for _ in range(max_attempts):
+        timestamp = datetime.now().strftime("%Y%m%d")
+        random_part = "".join(
+            random.choices(string.ascii_uppercase + string.digits, k=8)
+        )
+        order_number = f"AMZ{timestamp}{random_part}"
+
+        existing = db.query(Order).filter(Order.order_number == order_number).first()
+        if not existing:
+            return order_number
+
+    raise ValueError("Failed to generate unique order number")
 
 
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
@@ -61,16 +73,38 @@ def create_order(
             detail="Address not found"
         )
     
+    # Lock variants in deterministic order to avoid deadlocks and race conditions.
+    requested_quantities = {}
+    for cart_item in cart_items:
+        requested_quantities[cart_item.variant_id] = (
+            requested_quantities.get(cart_item.variant_id, 0) + cart_item.quantity
+        )
+
+    locked_variants = {}
+    for variant_id in sorted(requested_quantities.keys()):
+        locked_variant = (
+            db.query(ProductVariant)
+            .filter(ProductVariant.id == variant_id)
+            .with_for_update()
+            .first()
+        )
+        if not locked_variant:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Product variant {variant_id} not found",
+            )
+        locked_variants[variant_id] = locked_variant
+
     # Calculate totals
     subtotal = 0.0
     order_items_data = []
     
     for cart_item in cart_items:
-        variant = cart_item.variant
+        variant = locked_variants[cart_item.variant_id]
         product = cart_item.product
         
         # Check stock
-        if variant.stock_quantity < cart_item.quantity:
+        if variant.stock_quantity < requested_quantities[cart_item.variant_id]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Insufficient stock for {product.name}"
@@ -106,8 +140,16 @@ def create_order(
     total_amount = subtotal + tax_amount + shipping_charge
     
     # Create order
+    try:
+        order_number = generate_order_number(db)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate order number",
+        ) from exc
+
     order = Order(
-        order_number=generate_order_number(),
+        order_number=order_number,
         user_id=current_user.id,
         subtotal=subtotal,
         tax_amount=tax_amount,
@@ -129,9 +171,10 @@ def create_order(
             **item_data
         )
         db.add(order_item)
-        
-        # Note: stock deduction is performed during payment confirmation.
-        # Do NOT modify `ProductVariant.stock_quantity` here to avoid overselling.
+
+    # Deduct reserved stock while locks are still held in this transaction.
+    for variant_id, quantity in requested_quantities.items():
+        locked_variants[variant_id].stock_quantity -= quantity
     
     # Clear cart
     db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
@@ -164,22 +207,33 @@ def create_order(
             # email failures should not block the response
             pass
 
-        return {
-            "order_number": order.order_number,
-            "payment_method": "cod",
-            "message": "Order placed successfully. Pay on delivery."
-        }
+        return success(
+            message="Order placed successfully. Pay on delivery.",
+            data={
+                "order_number": order.order_number,
+                "payment_method": "cod",
+            },
+        )
 
-    # Default: razorpay - return order info for frontend to initiate payment
-    return {
+    # # Default: razorpay - return order info for frontend to initiate payment
+    # return {
+    #     "order_id": order.id,
+    #     "order_number": order.order_number,
+    #     "payment_method": "razorpay",
+    #     "message": "Proceed to payment"
+    # }
+
+
+    return success(
+    message="Order created successfully",
+    data={
         "order_id": order.id,
         "order_number": order.order_number,
-        "payment_method": "razorpay",
-        "message": "Proceed to payment"
+        "status": order.status,
     }
+)
 
-
-@router.get("/", response_model=List[dict])
+@router.get("/", response_model=dict)
 def get_user_orders(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
@@ -216,7 +270,7 @@ def get_user_orders(
             "tracking_number": order.tracking_number
         })
     
-    return orders_response
+    return success(data=orders_response, message="Orders retrieved")
 
 
 @router.get("/{order_number}", response_model=dict)
@@ -246,28 +300,31 @@ def get_order_detail(
         for item in order.items
     ]
     
-    return {
-        "id": order.id,
-        "order_number": order.order_number,
-        "status": order.status.value,
-        "subtotal": order.subtotal,
-        "tax_amount": order.tax_amount,
-        "shipping_charge": order.shipping_charge,
-        "total_amount": order.total_amount,
-        "items": items_response,
-        "shipping_address": {
-            "full_name": order.shipping_address.full_name,
-            "phone": order.shipping_address.phone,
-            "address_line1": order.shipping_address.address_line1,
-            "address_line2": order.shipping_address.address_line2,
-            "city": order.shipping_address.city,
-            "state": order.shipping_address.state,
-            "pincode": order.shipping_address.pincode
+    return success(
+        data={
+            "id": order.id,
+            "order_number": order.order_number,
+            "status": order.status.value,
+            "subtotal": order.subtotal,
+            "tax_amount": order.tax_amount,
+            "shipping_charge": order.shipping_charge,
+            "total_amount": order.total_amount,
+            "items": items_response,
+            "shipping_address": {
+                "full_name": order.shipping_address.full_name,
+                "phone": order.shipping_address.phone,
+                "address_line1": order.shipping_address.address_line1,
+                "address_line2": order.shipping_address.address_line2,
+                "city": order.shipping_address.city,
+                "state": order.shipping_address.state,
+                "pincode": order.shipping_address.pincode,
+            },
+            "created_at": order.created_at,
+            "tracking_number": order.tracking_number,
+            "customer_notes": order.customer_notes,
         },
-        "created_at": order.created_at,
-        "tracking_number": order.tracking_number,
-        "customer_notes": order.customer_notes
-    }
+        message="Order detail retrieved",
+    )
 
 
 @router.put("/{order_id}/cancel")
@@ -295,13 +352,14 @@ def cancel_order(
     previous_status = order.status
     order.status = OrderStatus.CANCELLED
 
-    # Only restore stock if it was previously deducted (i.e., order was CONFIRMED)
-    if previous_status == OrderStatus.CONFIRMED:
+    # Restore stock for states where inventory is reserved.
+    if previous_status in {OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PROCESSING}:
         for item in order.items:
             variant = item.variant
             variant.stock_quantity += item.quantity
 
     db.commit()
+    return success(message="Order cancelled successfully")
 
 
 # Order Tracking Endpoints
@@ -314,15 +372,13 @@ def update_order_status(
     db: Session = Depends(get_db)
 ):
     """Update order status (admin only)."""
-    try:
-        order = OrderTrackingService.update_order_status(
-            db, order_id, status_update, current_user.id
-        )
-        return {"order_id": order.id, "status": order.status.value}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    order = OrderTrackingService.update_order_status(
+        db, order_id, status_update, current_user.id
+    )
+    return success(
+        data={"order_id": order.id, "status": order.status.value},
+        message="Order status updated",
+    )
 
 
 @router.get("/{order_id}/tracking", response_model=dict)
@@ -332,28 +388,23 @@ def get_order_tracking(
     db: Session = Depends(get_db)
 ):
     """Get order tracking information."""
-    try:
-        tracking = OrderTrackingService.get_order_tracking(
-            db, order_id, current_user.id, current_user.role.value
-        )
-        return tracking.dict()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    tracking = OrderTrackingService.get_order_tracking(
+        db, order_id, current_user.id, current_user.role.value
+    )
+    return success(data=tracking.dict(), message="Order tracking retrieved")
 
 
-@router.get("/my/tracking", response_model=List[dict])
+@router.get("/my/tracking", response_model=dict)
 def get_user_orders_tracking(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Get tracking information for all user's orders."""
-    try:
-        tracking_list = OrderTrackingService.get_user_orders_tracking(db, current_user.id)
-        return [t.dict() for t in tracking_list]
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    tracking_list = OrderTrackingService.get_user_orders_tracking(db, current_user.id)
+    return success(
+        data=[t.dict() for t in tracking_list],
+        message="Orders tracking retrieved",
+    )
     
 
 
