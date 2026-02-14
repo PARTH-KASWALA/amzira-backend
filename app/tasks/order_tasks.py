@@ -7,7 +7,7 @@ from app.services.order_service import auto_cancel_pending_orders
 
 
 @shared_task(bind=True, max_retries=3)
-def cancel_expired_orders(self):
+def cleanup_expired_orders(self):
     """
     Cancel orders that are pending for more than 30 minutes.
     Runs periodically via Celery Beat.
@@ -19,3 +19,9 @@ def cancel_expired_orders(self):
         raise self.retry(exc=exc, countdown=60)
     finally:
         db.close()
+
+
+@shared_task(bind=True, max_retries=3)
+def cancel_expired_orders(self):
+    """Backward-compatible task name."""
+    return cleanup_expired_orders(self)

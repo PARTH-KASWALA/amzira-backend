@@ -1,4 +1,5 @@
 from fastapi import HTTPException, status
+from typing import Any, List, Optional
 
 
 class EmailAlreadyExists(HTTPException):
@@ -39,3 +40,10 @@ class OrderNotFound(HTTPException):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
+
+
+class APIError(Exception):
+    def __init__(self, status_code: int, message: str, errors: Optional[List[Any]] = None):
+        self.status_code = status_code
+        self.message = message
+        self.errors = errors or []

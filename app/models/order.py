@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Enum, Text
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Enum, Text, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -32,6 +32,9 @@ class Order(Base):
     
     # Status & Tracking
     status = Column(Enum(OrderStatus), default=OrderStatus.PENDING, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
+    stock_deducted = Column(Boolean, default=False, nullable=False)
+    idempotency_key = Column(String(64), unique=True, nullable=True, index=True)
     tracking_number = Column(String(100), nullable=True)
     carrier_name = Column(String(100), nullable=True)  # e.g., "FedEx", "UPS", "India Post"
     estimated_delivery_date = Column(DateTime, nullable=True)

@@ -45,6 +45,13 @@ class CategoryResponse(BaseModel):
         from_attributes = True
 
 
+class ProductDefaultVariantResponse(BaseModel):
+    variant_id: int
+    size: str
+    color: Optional[str]
+    stock_quantity: int
+
+
 class ProductListResponse(BaseModel):
     id: int
     name: str
@@ -53,6 +60,8 @@ class ProductListResponse(BaseModel):
     sale_price: Optional[float]
     discount_percentage: int
     is_featured: bool
+    stock_quantity: int
+    default_variant: Optional[ProductDefaultVariantResponse] = None
     category: CategoryResponse
     primary_image: Optional[str] = None
     in_stock: bool

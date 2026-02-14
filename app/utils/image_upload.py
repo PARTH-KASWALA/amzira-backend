@@ -1,21 +1,55 @@
 import os
 import uuid
 from io import BytesIO
+
 from fastapi import UploadFile, HTTPException
 from PIL import Image
+from pydantic import ValidationError
 from app.core.config import settings
-import imghdr
+from app.schemas.image import ImageUploadValidation
 import logging
 
 logger = logging.getLogger(__name__)
 
+ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+FORMAT_TO_MIME = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 
-ALLOWED_MIME = {
-    'jpg': 'image/jpeg',
-    'jpeg': 'image/jpeg',
-    'png': 'image/png',
-    'webp': 'image/webp'
-}
+
+def validate_image_upload(file: UploadFile) -> tuple[bytes, str]:
+    """Validate image upload and return raw bytes plus normalized extension."""
+    filename = getattr(file, "filename", "") or ""
+    max_size = settings.MAX_UPLOAD_SIZE
+    file.file.seek(0)
+    try:
+        data = file.file.read(max_size + 1)
+        try:
+            validated = ImageUploadValidation.model_validate(
+                {
+                    "filename": filename,
+                    "content_type": getattr(file, "content_type", None),
+                    "data": data,
+                    "max_size": max_size,
+                    "allowed_extensions": set(settings.ALLOWED_EXTENSIONS),
+                }
+            )
+        except ValidationError as exc:
+            error_message = exc.errors()[0].get("msg", "Invalid image file")
+            raise HTTPException(status_code=400, detail=error_message) from exc
+
+        detected_mime = ""
+        try:
+            import magic  # type: ignore
+            detected_mime = magic.from_buffer(validated.data, mime=True)
+        except Exception:
+            # Fallback for environments without libmagic; keep strict MIME allowlist.
+            with Image.open(BytesIO(validated.data)) as image:
+                detected_mime = FORMAT_TO_MIME.get((image.format or "").upper(), "")
+
+        if detected_mime not in ALLOWED_IMAGE_MIME_TYPES:
+            raise HTTPException(status_code=400, detail="Invalid image MIME type")
+        return validated.data, validated.detected_extension or ""
+    finally:
+        file.file.seek(0)
 
 
 def save_product_image(file: UploadFile) -> str:
@@ -27,30 +61,7 @@ def save_product_image(file: UploadFile) -> str:
     - Validate actual image headers using Pillow
     - Never trust client filename
     """
-    # Validate extension
-    filename = getattr(file, 'filename', '') or ''
-    file_extension = filename.split('.')[-1].lower() if '.' in filename else ''
-    if file_extension not in settings.ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Invalid file extension")
-
-    # Validate content type header if provided
-    content_type = getattr(file, 'content_type', '')
-    expected_mime = ALLOWED_MIME.get(file_extension)
-    if content_type and expected_mime and content_type != expected_mime:
-        raise HTTPException(status_code=400, detail="MIME type does not match file extension")
-
-    # Read up to max size + 1 to enforce limit
-    max_size = settings.MAX_UPLOAD_SIZE
-    data = file.file.read(max_size + 1)
-    if len(data) == 0:
-        raise HTTPException(status_code=400, detail="Empty file")
-    if len(data) > max_size:
-        raise HTTPException(status_code=400, detail="File too large")
-
-    # Verify image header using imghdr and Pillow
-    detected = imghdr.what(None, h=data)
-    if detected is None or detected not in settings.ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Invalid image file")
+    data, file_extension = validate_image_upload(file)
 
     try:
         img = Image.open(BytesIO(data))
@@ -103,8 +114,3 @@ def delete_product_image(image_path: str):
             os.remove(path)
     except Exception:
         logger.exception("Error deleting image: %s", image_path)
-
-
-
-
-

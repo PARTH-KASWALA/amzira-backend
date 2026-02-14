@@ -10,3 +10,4 @@ from app.models.wishlist import Wishlist
 from app.models.coupon import Coupon
 from app.models.coupon_usage import CouponUsage
 from app.models.order_status_history import OrderStatusHistory
+from app.models.token_blacklist import TokenBlacklist

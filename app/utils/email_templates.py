@@ -1,4 +1,5 @@
 from datetime import datetime
+from app.core.config import settings
 
 def order_confirmation_template(order, user):
     """HTML email template for order confirmation"""
@@ -87,3 +88,62 @@ def order_confirmation_template(order, user):
     """
     
     return html
+
+
+def order_shipped_template(order, user, tracking_number: str):
+    """HTML email template for order shipped update."""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <h2>Good news, {user.full_name}!</h2>
+        <p>Your order <strong>#{order.order_number}</strong> has been shipped.</p>
+        <p>Tracking Number: <strong>{tracking_number}</strong></p>
+        <p>You can track your order here:
+            <a href="{settings.FRONTEND_URL}/orders/{order.order_number}">
+                Track Order
+            </a>
+        </p>
+        <p>Team AMZIRA</p>
+    </body>
+    </html>
+    """
+
+
+def order_delivered_template(order, user):
+    """HTML email template for order delivered update."""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <h2>Order Delivered</h2>
+        <p>Hello {user.full_name},</p>
+        <p>Your order <strong>#{order.order_number}</strong> has been delivered.</p>
+        <p>Thank you for shopping with AMZIRA.</p>
+        <p>Team AMZIRA</p>
+    </body>
+    </html>
+    """
+
+
+def password_reset_template(reset_token: str):
+    """HTML email template for password reset."""
+    reset_link = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
+    current_year = datetime.utcnow().year
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <h2>Password Reset Request</h2>
+        <p>We received a request to reset your AMZIRA password.</p>
+        <p>
+            <a href="{reset_link}" style="background:#8B4513;color:#fff;padding:10px 16px;text-decoration:none;border-radius:4px;">
+                Reset Password
+            </a>
+        </p>
+        <p>If you did not request this, you can ignore this email.</p>
+        <p>This link expires shortly for security reasons.</p>
+        <p>&copy; {current_year} AMZIRA</p>
+    </body>
+    </html>
+    """

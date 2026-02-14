@@ -56,6 +56,33 @@ def build_email(
 
 
 # -------------------------------
+# Generic Email Task
+# -------------------------------
+@celery_app.task(base=EmailTask, bind=True)
+def send_email_task(
+    self,
+    to_email: str,
+    subject: str,
+    body: str,
+    html: Optional[str] = None,
+    from_email: Optional[str] = None,
+):
+    try:
+        msg = build_email(
+            to=to_email,
+            subject=subject,
+            text=body,
+            html=html,
+            from_email=from_email,
+        )
+        _send_email_smtp(msg)
+        logger.info("email_sent", to=to_email, subject=subject)
+    except Exception as exc:
+        logger.exception("email_send_error", exc_info=exc)
+        raise self.retry(exc=exc)
+
+
+# -------------------------------
 # Order Confirmation
 # -------------------------------
 @celery_app.task(base=EmailTask, bind=True)
@@ -77,7 +104,7 @@ def send_order_confirmation(self, order_id: int):
             subject=f"Order Confirmed - {order.order_number}",
             text=f"Your order {order.order_number} has been confirmed.",
             html=html,
-            from_email=settings.EMAILS_FROM_ORDERS,
+            from_email=settings.EMAILS_FROM_ORDERS or settings.EMAILS_FROM_EMAIL,
         )
 
         _send_email_smtp(msg)
@@ -111,7 +138,7 @@ def send_order_shipped(self, order_id: int, tracking_number: str):
             subject=f"Order Shipped - {order.order_number}",
             text=f"Your order {order.order_number} has been shipped.",
             html=html,
-            from_email=settings.EMAILS_FROM_SHIPPING,
+            from_email=settings.EMAILS_FROM_SHIPPING or settings.EMAILS_FROM_EMAIL,
         )
 
         _send_email_smtp(msg)
@@ -145,7 +172,7 @@ def send_order_delivered(self, order_id: int):
             subject=f"Order Delivered - {order.order_number}",
             text=f"Your order {order.order_number} has been delivered.",
             html=html,
-            from_email=settings.EMAILS_FROM_SHIPPING,
+            from_email=settings.EMAILS_FROM_SHIPPING or settings.EMAILS_FROM_EMAIL,
         )
 
         _send_email_smtp(msg)
@@ -170,7 +197,7 @@ def send_password_reset(self, user_email: str, reset_token: str):
             subject="Reset Your AMZIRA Password",
             text="Click the link to reset your password.",
             html=html,
-            from_email=settings.EMAILS_FROM_SUPPORT,
+            from_email=settings.EMAILS_FROM_SUPPORT or settings.EMAILS_FROM_EMAIL,
         )
 
         _send_email_smtp(msg)

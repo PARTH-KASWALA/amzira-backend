@@ -1,6 +1,9 @@
-from pydantic import BaseModel, validator
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime
+import uuid
+
+import bleach
+from pydantic import BaseModel, Field, field_validator
 
 
 class OrderItemResponse(BaseModel):
@@ -16,22 +19,27 @@ class OrderItemResponse(BaseModel):
 
 
 class OrderCreate(BaseModel):
-    shipping_address_id: int
-    billing_address_id: int
-    payment_method: str = "razorpay"
+    shipping_address_id: int = Field(..., gt=0)
+    billing_address_id: int = Field(..., gt=0)
+    payment_method: Literal["razorpay", "cod"] = "razorpay"
     customer_notes: Optional[str] = None
+    idempotency_key: str = Field(..., min_length=36, max_length=64)
 
-    @validator("customer_notes")
-    def validate_notes(cls, value):
-        if value and len(value) > 500:
+    @field_validator("customer_notes")
+    @classmethod
+    def validate_notes(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        sanitized = bleach.clean(value, tags=[], attributes={}, strip=True).strip()
+        if len(sanitized) > 500:
             raise ValueError("Notes too long (max 500 chars)")
-        return value
+        return sanitized
 
-    @validator("shipping_address_id", "billing_address_id")
-    def validate_address_ids(cls, value):
-        if value <= 0:
-            raise ValueError("Invalid address ID")
-        return value
+    @field_validator("idempotency_key")
+    @classmethod
+    def validate_idempotency_key(cls, value: str) -> str:
+        parsed = uuid.UUID(value)
+        return str(parsed)
 
 
 class OrderResponse(BaseModel):

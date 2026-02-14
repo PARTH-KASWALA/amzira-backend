@@ -1,8 +1,24 @@
 import logging
+import smtplib
+from email.message import EmailMessage
 from typing import Optional
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _send_email_smtp(msg: EmailMessage) -> None:
+    """
+    Send an email message over SMTP.
+    This is intended to be called from Celery workers, not request handlers.
+    """
+    with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        if settings.SMTP_USER and settings.SMTP_PASSWORD:
+            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+        server.send_message(msg)
 
 
 def send_email_async(to_email: str, subject: str, body: str, html: Optional[str] = None) -> None:

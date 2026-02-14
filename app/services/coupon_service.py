@@ -2,12 +2,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 from fastapi import HTTPException, status
 from datetime import datetime
-from typing import Optional
+import structlog
 
 from app.models.coupon import Coupon, DiscountType
 from app.models.coupon_usage import CouponUsage
-from app.schemas.coupon import CouponCreate, CouponUpdate, CouponResponse, ApplyCouponRequest, ApplyCouponResponse
-from app.utils.response import success, error
+from app.models.order import Order, OrderStatus
+from app.schemas.coupon import CouponCreate, CouponUpdate, CouponResponse, ApplyCouponResponse
+
+logger = structlog.get_logger()
 
 
 class CouponService:
@@ -188,48 +190,92 @@ class CouponService:
     @staticmethod
     def apply_coupon_to_order(db: Session, order_id: int, user_id: int, coupon_code: str):
         """Apply coupon to an existing order (during checkout)."""
-        from app.models.order import Order
-        
-        order = db.query(Order).filter(
-            and_(Order.id == order_id, Order.user_id == user_id)
-        ).first()
-        
-        if not order:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found"
+        try:
+            order = (
+                db.query(Order)
+                .filter(and_(Order.id == order_id, Order.user_id == user_id))
+                .with_for_update()
+                .first()
             )
-        
-        if order.status != "pending":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot apply coupon to non-pending order"
+            if not order:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Order not found",
+                )
+            if order.status != OrderStatus.PENDING:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot apply coupon to non-pending order",
+                )
+
+            coupon = (
+                db.query(Coupon)
+                .filter(and_(Coupon.code == coupon_code, Coupon.is_active == True))
+                .with_for_update()
+                .first()
             )
-        
-        # Validate coupon
-        result = CouponService.validate_and_apply_coupon(db, user_id, coupon_code, order.subtotal)
-        
-        if not result.valid:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result.message
+            if not coupon:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid or inactive coupon code",
+                )
+
+            if coupon.expiry_date and coupon.expiry_date < datetime.utcnow():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Coupon has expired")
+            if order.subtotal < coupon.min_order_value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Minimum order value of ₹{coupon.min_order_value} required",
+                )
+            if coupon.usage_limit and coupon.used_count >= coupon.usage_limit:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Coupon usage limit exceeded")
+
+            user_usage_count = db.query(func.count(CouponUsage.id)).filter(
+                and_(CouponUsage.coupon_id == coupon.id, CouponUsage.user_id == user_id)
+            ).scalar() or 0
+            if user_usage_count >= coupon.per_user_limit:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="You have already used this coupon the maximum allowed times",
+                )
+
+            existing_order_usage = db.query(CouponUsage).filter(CouponUsage.order_id == order_id).first()
+            if existing_order_usage:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Coupon already applied to this order",
+                )
+
+            if coupon.discount_type == DiscountType.PERCENTAGE:
+                discount_amount = (order.subtotal * coupon.discount_value) / 100
+                if coupon.max_discount and discount_amount > coupon.max_discount:
+                    discount_amount = coupon.max_discount
+            else:
+                discount_amount = min(coupon.discount_value, order.subtotal)
+
+            final_total = max(0, order.subtotal - discount_amount)
+            order.discount_amount = discount_amount
+            order.coupon_code = coupon.code
+            order.total_amount = final_total
+
+            coupon.used_count += 1
+            db.add(
+                CouponUsage(
+                    coupon_id=coupon.id,
+                    user_id=user_id,
+                    order_id=order_id,
+                )
             )
-        
-        # Apply discount
-        order.discount_amount = result.discount_amount
-        order.coupon_code = coupon_code
-        order.total_amount = result.final_total
-        
-        # Record usage
-        coupon = db.query(Coupon).filter(Coupon.code == coupon_code).first()
-        coupon.used_count += 1
-        
-        coupon_usage = CouponUsage(
-            coupon_id=coupon.id,
-            user_id=user_id,
-            order_id=order_id
-        )
-        
-        db.add(coupon_usage)
-        db.commit()
-        db.refresh(order)
+            db.commit()
+            db.refresh(order)
+            return order
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            logger.exception("coupon_apply_failed", order_id=order_id, user_id=user_id, coupon_code=coupon_code)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to apply coupon",
+            )

@@ -1,27 +1,3 @@
-# from celery import Celery
-# from celery.schedules import crontab
-# from app.core.config import settings
-
-# broker = getattr(settings, "CELERY_BROKER_URL", "redis://localhost:6379/0")
-# backend = getattr(settings, "CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
-
-# celery_app = Celery(
-#     "amzira",
-#     broker=broker,
-#     backend=backend,
-# )
-
-# celery_app.conf.beat_schedule = {
-#     "cancel-expired-orders": {
-#         "task": "app.tasks.order_tasks.cancel_expired_orders",
-#         "schedule": crontab(minute="*/5"),
-#     }
-# }
-
-# celery_app.conf.timezone = "UTC"
-
-
-
 from celery import Celery
 from app.core.config import settings
 
@@ -29,7 +5,7 @@ celery_app = Celery(
     "amzira",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=["app.tasks.email_tasks", "app.tasks.order_tasks"]
+    include=["app.tasks.email_tasks", "app.tasks.order_tasks", "app.tasks.security_tasks"]
 )
 
 # Auto-discover tasks from app.tasks
@@ -68,7 +44,11 @@ from celery.schedules import crontab
 
 celery_app.conf.beat_schedule = {
     "cancel-expired-orders-every-5-min": {
-        "task": "app.tasks.order_tasks.cancel_expired_orders",
+        "task": "app.tasks.order_tasks.cleanup_expired_orders",
         "schedule": crontab(minute="*/5"),
+    },
+    "cleanup-expired-blacklisted-tokens-daily": {
+        "task": "app.tasks.security_tasks.cleanup_expired_blacklisted_tokens",
+        "schedule": crontab(hour=3, minute=0),
     },
 }

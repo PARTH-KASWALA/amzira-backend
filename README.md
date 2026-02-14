@@ -33,3 +33,29 @@ fastapi-mail==1.4.1
 # Testing
 pytest==7.4.3
 httpx==0.25.2# amzira-backend
+
+## Database Migrations
+
+### Creating a Migration
+```bash
+alembic revision --autogenerate -m "Describe change"
+alembic upgrade head
+```
+
+### Rolling Back
+```bash
+alembic downgrade -1
+alembic downgrade base
+```
+
+### Production Deployment Checklist
+1. Backup production database.
+2. Enable maintenance mode.
+3. Run `alembic upgrade head`.
+4. Verify critical queries.
+5. Disable maintenance mode.
+
+### Best Practices
+- Never edit migration files after deployment.
+- Always test migrations on staging first.
+- Keep migrations small and focused.

@@ -1,26 +1,36 @@
-from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
+from sqlalchemy.orm import Session, selectinload, joinedload
 from sqlalchemy import or_, and_
 from typing import Optional, List
+from datetime import datetime, timedelta
+import re
 from app.db.session import get_db
 from app.models.product import Product, ProductImage, ProductVariant, Occasion
 from app.models.category import Category, Subcategory
 from app.schemas.product import ProductListResponse, ProductDetailResponse, CategoryResponse
 from app.core.exceptions import ProductNotFound
 from app.utils.response import success
+from app.core.rate_limiter import limiter
 
 router = APIRouter()
+PINCODE_RE = re.compile(r"^\d{6}$")
+FREE_SHIPPING_THRESHOLD = 2000.0
+DEFAULT_SHIPPING_CHARGE = 100.0
 
 
 @router.get("/categories", response_model=dict)
-def get_categories(db: Session = Depends(get_db)):
+@limiter.limit("100/minute")
+def get_categories(request: Request, db: Session = Depends(get_db)):
     """Get all active categories"""
     categories = db.query(Category).filter(Category.is_active == True).order_by(Category.display_order).all()
     return success(data=categories, message="Categories retrieved")
 
 
+@router.get("", response_model=dict)
 @router.get("/", response_model=dict)
+@limiter.limit("100/minute")
 def get_products(
+    request: Request,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     category: Optional[str] = None,
@@ -36,7 +46,15 @@ def get_products(
     """
     Get products with filtering and pagination
     """
-    query = db.query(Product).filter(Product.is_active == True)
+    query = (
+        db.query(Product)
+        .options(
+            selectinload(Product.category),
+            selectinload(Product.images),
+            selectinload(Product.variants),
+        )
+        .filter(Product.is_active == True)
+    )
     
     # Category filter
     if category:
@@ -108,8 +126,23 @@ def get_products(
         if not primary_image and product.images:
             primary_image = product.images[0].image_url
         
-        # Check stock
-        in_stock = any(v.stock_quantity > 0 for v in product.variants)
+        active_variants = [variant for variant in product.variants if variant.is_active]
+        in_stock_variants = sorted(
+            [variant for variant in active_variants if variant.stock_quantity > 0],
+            key=lambda variant: variant.id,
+        )
+        default_variant = None
+        if in_stock_variants:
+            chosen = in_stock_variants[0]
+            default_variant = {
+                "variant_id": chosen.id,
+                "size": chosen.size,
+                "color": chosen.color,
+                "stock_quantity": chosen.stock_quantity,
+            }
+
+        stock_quantity = sum(v.stock_quantity for v in active_variants)
+        in_stock = stock_quantity > 0
         
         products_list.append({
             "id": product.id,
@@ -119,6 +152,8 @@ def get_products(
             "sale_price": product.sale_price,
             "discount_percentage": product.discount_percentage,
             "is_featured": product.is_featured,
+            "stock_quantity": stock_quantity,
+            "default_variant": default_variant,
             "category": {
                 "id": product.category.id,
                 "name": product.category.name,
@@ -140,26 +175,60 @@ def get_products(
     )
 
 
+@router.get("/category/{category_slug}")
+@limiter.limit("100/minute")
+def get_products_by_category(
+    request: Request,
+    category_slug: str,
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    """Get products by category slug"""
+    return get_products(request=request, page=page, limit=limit, category=category_slug, db=db)
+
+
+@router.get("/occasion/{occasion_slug}")
+@limiter.limit("100/minute")
+def get_products_by_occasion(
+    request: Request,
+    occasion_slug: str,
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    """Get products by occasion slug"""
+    return get_products(request=request, page=page, limit=limit, occasion=occasion_slug, db=db)
+
+
 @router.get("/{slug}", response_model=dict)
-def get_product_detail(slug: str, db: Session = Depends(get_db)):
-    """Get product details by slug"""
-    product = db.query(Product).filter(
-        Product.slug == slug,
-        Product.is_active == True
-    ).first()
-    
+@limiter.limit("100/minute")
+def get_product_detail(request: Request, slug: str, db: Session = Depends(get_db)):
+    """Get product details by slug."""
+    product = (
+        db.query(Product)
+        .options(
+            joinedload(Product.images),
+            joinedload(Product.category),
+            selectinload(Product.variants),
+            selectinload(Product.occasions),
+        )
+        .filter(
+            Product.slug == slug,
+            Product.is_active == True
+        )
+        .first()
+    )
+
     if not product:
         raise ProductNotFound()
-    
-    # Get primary image
+
     primary_image = next((img.image_url for img in product.images if img.is_primary), None)
     if not primary_image and product.images:
         primary_image = product.images[0].image_url
-    
-    # Check stock
+
     in_stock = any(v.stock_quantity > 0 for v in product.variants)
-    
-    # Format images
+
     images = [
         {
             "id": img.id,
@@ -170,8 +239,7 @@ def get_product_detail(slug: str, db: Session = Depends(get_db)):
         }
         for img in sorted(product.images, key=lambda x: (not x.is_primary, x.display_order))
     ]
-    
-    # Format variants
+
     variants = [
         {
             "id": v.id,
@@ -184,8 +252,7 @@ def get_product_detail(slug: str, db: Session = Depends(get_db)):
         }
         for v in product.variants if v.is_active
     ]
-    
-    # Format occasions
+
     occasions = [
         {
             "id": occ.id,
@@ -194,7 +261,7 @@ def get_product_detail(slug: str, db: Session = Depends(get_db)):
         }
         for occ in product.occasions
     ]
-    
+
     return success(
         data={
             "id": product.id,
@@ -205,6 +272,9 @@ def get_product_detail(slug: str, db: Session = Depends(get_db)):
             "sale_price": product.sale_price,
             "discount_percentage": product.discount_percentage,
             "is_featured": product.is_featured,
+            "total_stock": product.total_stock,
+            "avg_rating": product.avg_rating,
+            "review_count": product.review_count,
             "fabric": product.fabric,
             "care_instructions": product.care_instructions,
             "category": {
@@ -223,23 +293,52 @@ def get_product_detail(slug: str, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/category/{category_slug}")
-def get_products_by_category(
-    category_slug: str,
-    page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db)
+@router.get("/{slug}/delivery-estimate", response_model=dict)
+@limiter.limit("60/minute")
+def get_product_delivery_estimate(
+    request: Request,
+    slug: str,
+    pincode: str = Query(..., description="6 digit Indian pincode"),
+    db: Session = Depends(get_db),
 ):
-    """Get products by category slug"""
-    return get_products(page=page, limit=limit, category=category_slug, db=db)
+    """Estimate shipping SLA and COD availability for a PDP pincode check."""
+    if not PINCODE_RE.match(str(pincode or "").strip()):
+        raise HTTPException(status_code=400, detail="Pincode must be 6 digits")
 
+    product = (
+        db.query(Product)
+        .filter(
+            Product.slug == slug,
+            Product.is_active == True,
+        )
+        .first()
+    )
+    if not product:
+        raise ProductNotFound()
 
-@router.get("/occasion/{occasion_slug}")
-def get_products_by_occasion(
-    occasion_slug: str,
-    page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db)
-):
-    """Get products by occasion slug"""
-    return get_products(page=page, limit=limit, occasion=occasion_slug, db=db)
+    current_price = product.sale_price if product.sale_price is not None else product.base_price
+    shipping_cost = 0.0 if current_price >= FREE_SHIPPING_THRESHOLD else DEFAULT_SHIPPING_CHARGE
+
+    first_digit = pincode[0]
+    if first_digit in {"1", "2", "3", "4"}:
+        min_days, max_days, cod_available = 2, 4, True
+    elif first_digit in {"5", "6"}:
+        min_days, max_days, cod_available = 4, 6, True
+    elif first_digit in {"7", "8"}:
+        min_days, max_days, cod_available = 5, 7, True
+    else:
+        min_days, max_days, cod_available = 6, 8, False
+
+    today = datetime.utcnow().date()
+    return success(
+        data={
+            "pincode": pincode,
+            "cod_available": cod_available,
+            "shipping_cost": shipping_cost,
+            "delivery_days_min": min_days,
+            "delivery_days_max": max_days,
+            "estimated_delivery_date_start": (today + timedelta(days=min_days)).isoformat(),
+            "estimated_delivery_date_end": (today + timedelta(days=max_days)).isoformat(),
+        },
+        message="Delivery estimate retrieved",
+    )

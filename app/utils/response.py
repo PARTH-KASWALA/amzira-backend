@@ -1,4 +1,5 @@
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from typing import Any, Optional, Dict
 
 
@@ -17,7 +18,8 @@ def success(
     if meta is not None:
         response["meta"] = meta
 
-    return response
+    # Ensure SQLAlchemy models, datetimes, Decimals, etc. are JSON-serializable.
+    return jsonable_encoder(response)
 
 
 def error(

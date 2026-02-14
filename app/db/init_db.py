@@ -1,8 +1,12 @@
 from sqlalchemy.orm import Session
+import logging
 from app.models.user import User, UserRole
-from app.models.category import Category, Subcategory
+from app.models.category import Category
 from app.models.product import Occasion
+from app.core.config import settings
 from app.core.security import hash_password
+
+logger = logging.getLogger(__name__)
 
 
 def init_db(db: Session) -> None:
@@ -11,16 +15,27 @@ def init_db(db: Session) -> None:
     # Create admin user
     admin = db.query(User).filter(User.email == "admin@amzira.com").first()
     if not admin:
-        admin = User(
-            email="admin@amzira.com",
-            password_hash=hash_password("Admin@123"),
-            full_name="AMZIRA Admin",
-            role=UserRole.ADMIN,
-            is_active=True,
-            is_verified=True
-        )
-        db.add(admin)
-        print("✓ Admin user created: admin@amzira.com / Admin@123")
+        seed_password = (settings.DEFAULT_ADMIN_PASSWORD or "").strip()
+        if not seed_password:
+            message = (
+                "Missing admin bootstrap credentials: set DEFAULT_ADMIN_PASSWORD "
+                "or create an admin user manually before launch."
+            )
+            if settings.ENVIRONMENT == "production":
+                logger.error("%s env=%s", message, settings.ENVIRONMENT)
+                raise RuntimeError(message)
+            logger.warning("%s env=%s", message, settings.ENVIRONMENT)
+        else:
+            admin = User(
+                email="admin@amzira.com",
+                password_hash=hash_password(seed_password),
+                full_name="AMZIRA Admin",
+                role=UserRole.ADMIN,
+                is_active=True,
+                is_verified=True
+            )
+            db.add(admin)
+            logger.info("admin_user_created email=admin@amzira.com")
     
     # Create categories
     categories_data = [
@@ -40,7 +55,7 @@ def init_db(db: Session) -> None:
                 description=cat_data["description"]
             )
             db.add(category)
-            print(f"✓ Category created: {cat_data['name']}")
+            logger.info("category_created name=%s", cat_data["name"])
     
     # Create occasions
     occasions_data = ["Wedding", "Reception", "Sangeet", "Engagement", "Festival", "Party"]
@@ -54,10 +69,10 @@ def init_db(db: Session) -> None:
                 slug=slugify(occ_name)
             )
             db.add(occasion)
-            print(f"✓ Occasion created: {occ_name}")
+            logger.info("occasion_created name=%s", occ_name)
     
     db.commit()
-    print("\n✓ Database initialized successfully!")
+    logger.info("database_initialized")
 
 
 if __name__ == "__main__":

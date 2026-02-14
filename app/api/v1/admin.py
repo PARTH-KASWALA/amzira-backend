@@ -1,6 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+import logging
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Body, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from pydantic import BaseModel, EmailStr
 from slugify import slugify
 from app.db.session import get_db
 from app.api.deps import require_admin
@@ -9,16 +11,130 @@ from app.models.product import Product, ProductImage, ProductVariant, Occasion
 from app.models.category import Category, Subcategory
 from app.models.order import Order, OrderStatus
 from app.schemas.product import ProductCreate
+from app.services.order_service import auto_cancel_pending_orders
+from app.core.rate_limiter import limiter
 from app.utils.image_upload import save_product_image, delete_product_image
 from app.utils.response import success
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+class AdminTestEmailRequest(BaseModel):
+    email: EmailStr
+
+
+class BulkCategoryItem(BaseModel):
+    name: str
+    slug: Optional[str] = None
+    display_order: int = 0
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    is_active: bool = True
+
+
+class BulkCategoryCreateRequest(BaseModel):
+    categories: List[BulkCategoryItem]
+
+
+class BulkProductCategoryUpdateRequest(BaseModel):
+    product_ids: List[int]
+    category_id: int
+
+
+def _normalize_slug(value: str) -> str:
+    normalized = slugify(value)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Slug cannot be empty")
+    return normalized
+
+
+def _require_existing_category(db: Session, category_id: int) -> Category:
+    category = db.query(Category).filter(Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=400, detail=f"Invalid category_id: {category_id}")
+    return category
+
+
+def _resolve_product_category(
+    db: Session,
+    category_id: int,
+    subcategory_id: Optional[int] = None,
+) -> tuple[int, Optional[int]]:
+    category = _require_existing_category(db, category_id)
+    if category.parent_id:
+        if subcategory_id is not None:
+            subcategory = db.query(Subcategory).filter(Subcategory.id == subcategory_id).first()
+            if not subcategory:
+                raise HTTPException(status_code=400, detail=f"Invalid subcategory_id: {subcategory_id}")
+            return category.parent_id, subcategory_id
+
+        legacy_subcategory = db.query(Subcategory).filter(Subcategory.slug == category.slug).first()
+        if legacy_subcategory:
+            return category.parent_id, legacy_subcategory.id
+
+        # No legacy subcategory match: keep leaf category as the product category
+        return category.id, None
+    return category.id, subcategory_id
+
+
+@router.post("/test-email")
+@limiter.limit("10/minute")
+def admin_test_email(
+    request: Request,
+    email: Optional[EmailStr] = Query(None),
+    payload: Optional[AdminTestEmailRequest] = Body(None),
+    current_admin: User = Depends(require_admin),
+):
+    """Admin: Queue a test email via Celery."""
+    recipient = email or (payload.email if payload else None)
+    if not recipient:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    subject = "Test Email from AMZIRA"
+    body = "This is a test email from AMZIRA backend."
+    html = """
+    <html>
+      <body>
+        <h3>AMZIRA Test Email</h3>
+        <p>This is a test email from the AMZIRA backend.</p>
+      </body>
+    </html>
+    """
+
+    try:
+        from app.tasks.email_tasks import send_email_task
+        send_email_task.delay(str(recipient), subject, body, html)
+    except Exception:
+        logger.exception("admin_test_email_queue_failed", email=str(recipient))
+        raise HTTPException(status_code=500, detail="Failed to queue test email")
+
+    return success(
+        data={"email": str(recipient)},
+        message="Test email queued successfully",
+    )
+
+
+@router.post("/maintenance/cleanup-expired-orders")
+@limiter.limit("10/minute")
+def cleanup_expired_orders_admin(
+    request: Request,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    cleaned = auto_cancel_pending_orders(db)
+    return success(
+        data={"cleaned_orders": cleaned},
+        message="Expired pending orders cleaned",
+    )
 
 
 # ============= PRODUCT MANAGEMENT =============
 
 @router.post("/products", status_code=201)
+@limiter.limit("30/minute")
 def create_product(
+    request: Request,
     name: str = Form(...),
     category_id: int = Form(...),
     description: Optional[str] = Form(None),
@@ -29,11 +145,14 @@ def create_product(
     is_featured: bool = Form(False),
     subcategory_id: Optional[int] = Form(None),
     occasion_ids: str = Form(""),  # Comma-separated IDs
-    images: List[UploadFile] = File(...),
+    image_urls: Optional[str] = Form(None),  # Comma-separated URLs
+    images: Optional[List[UploadFile]] = File(None),
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Admin: Create new product"""
+    category_id, subcategory_id = _resolve_product_category(db, category_id, subcategory_id)
+
     # Generate slug
     slug = slugify(name)
     
@@ -71,18 +190,36 @@ def create_product(
         occasions = db.query(Occasion).filter(Occasion.id.in_(occ_ids)).all()
         product.occasions = occasions
     
-    # Upload images
-    for idx, image_file in enumerate(images):
-        image_url = save_product_image(image_file)
-        
-        product_image = ProductImage(
-            product_id=product.id,
-            image_url=image_url,
-            alt_text=name,
-            display_order=idx,
-            is_primary=(idx == 0)
-        )
-        db.add(product_image)
+    # Add images (either by URLs or uploads)
+    if image_urls:
+        url_list = [url.strip() for url in image_urls.split(",") if url.strip()]
+        if not url_list:
+            raise HTTPException(status_code=400, detail="image_urls must not be empty")
+        for idx, image_url in enumerate(url_list):
+            if not image_url.startswith("/static/"):
+                raise HTTPException(status_code=400, detail="image_urls must start with /static/")
+            product_image = ProductImage(
+                product_id=product.id,
+                image_url=image_url,
+                alt_text=name,
+                display_order=idx,
+                is_primary=(idx == 0)
+            )
+            db.add(product_image)
+    elif images:
+        for idx, image_file in enumerate(images):
+            image_url = save_product_image(image_file)
+            
+            product_image = ProductImage(
+                product_id=product.id,
+                image_url=image_url,
+                alt_text=name,
+                display_order=idx,
+                is_primary=(idx == 0)
+            )
+            db.add(product_image)
+    else:
+        raise HTTPException(status_code=400, detail="Provide image_urls or images")
     
     db.commit()
     db.refresh(product)
@@ -94,7 +231,9 @@ def create_product(
 
 
 @router.put("/products/{product_id}")
+@limiter.limit("30/minute")
 def update_product(
+    request: Request,
     product_id: int,
     name: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
@@ -143,7 +282,9 @@ def update_product(
 
 
 @router.delete("/products/{product_id}")
+@limiter.limit("20/minute")
 def delete_product(
+    request: Request,
     product_id: int,
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
@@ -161,8 +302,47 @@ def delete_product(
     return success(message="Product deleted successfully")
 
 
+@router.put("/products/bulk-update-category")
+@limiter.limit("20/minute")
+def bulk_update_product_category(
+    request: Request,
+    payload: BulkProductCategoryUpdateRequest = Body(...),
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin: Bulk reassign products to a category in one transaction."""
+    if not payload.product_ids:
+        raise HTTPException(status_code=400, detail="product_ids cannot be empty")
+
+    product_ids = sorted(set(payload.product_ids))
+    category_id, _ = _resolve_product_category(db, payload.category_id)
+
+    existing_products = db.query(Product.id).filter(Product.id.in_(product_ids)).all()
+    existing_ids = {product_id for (product_id,) in existing_products}
+    missing_ids = sorted(set(product_ids) - existing_ids)
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"Products not found: {missing_ids}")
+
+    try:
+        updated_count = db.query(Product).filter(Product.id.in_(product_ids)).update(
+            {Product.category_id: category_id},
+            synchronize_session=False,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return success(
+        data={"updated_count": updated_count, "category_id": category_id},
+        message="Products updated successfully",
+    )
+
+
 @router.post("/products/{product_id}/images")
+@limiter.limit("30/minute")
 async def add_product_images(
+    request: Request,
     product_id: int,
     images: List[UploadFile] = File(...),
     current_admin: User = Depends(require_admin),
@@ -196,7 +376,9 @@ async def add_product_images(
 
 
 @router.delete("/products/images/{image_id}")
+@limiter.limit("30/minute")
 def delete_product_image_endpoint(
+    request: Request,
     image_id: int,
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
@@ -220,7 +402,9 @@ def delete_product_image_endpoint(
 # ============= VARIANT MANAGEMENT =============
 
 @router.post("/products/{product_id}/variants")
+@limiter.limit("30/minute")
 def add_product_variant(
+    request: Request,
     product_id: int,
     size: str = Form(...),
     color: Optional[str] = Form(None),
@@ -261,7 +445,9 @@ def add_product_variant(
 
 
 @router.put("/variants/{variant_id}")
+@limiter.limit("30/minute")
 def update_variant_stock(
+    request: Request,
     variant_id: int,
     stock_quantity: int = Form(...),
     current_admin: User = Depends(require_admin),
@@ -287,7 +473,9 @@ def update_variant_stock(
 # ============= ORDER MANAGEMENT =============
 
 @router.get("/orders")
+@limiter.limit("60/minute")
 def get_all_orders(
+    request: Request,
     status: Optional[str] = None,
     page: int = 1,
     limit: int = 20,
@@ -329,7 +517,9 @@ def get_all_orders(
 
 
 @router.get("/orders/{order_id}")
+@limiter.limit("60/minute")
 def get_order_detail_admin(
+    request: Request,
     order_id: int,
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
@@ -388,8 +578,29 @@ def get_order_detail_admin(
     )
 
 
-@router.put("/orders/{order_id}/status")
+@router.put(
+    "/orders/{order_id}/status",
+    summary="Update order status (admin)",
+    description="""
+Updates order status and optional tracking/admin note fields.
+
+Behavior:
+1. Validates order exists
+2. Validates status value against allowed enum
+3. Updates tracking number and admin notes if provided
+4. Commits changes in one transaction
+""",
+    responses={
+        200: {"description": "Order status updated successfully"},
+        400: {"description": "Invalid status"},
+        403: {"description": "Admin access required"},
+        404: {"description": "Order not found"},
+    },
+    tags=["Admin"],
+)
+@limiter.limit("30/minute")
 def update_order_status(
+    request: Request,
     order_id: int,
     status: str = Form(...),
     tracking_number: Optional[str] = Form(None),
@@ -424,15 +635,29 @@ def update_order_status(
 
 # ============= CATEGORY MANAGEMENT =============
 
+@router.get("/categories")
+@limiter.limit("60/minute")
+def list_categories(
+    request: Request,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin: List categories (active and inactive)."""
+    categories = db.query(Category).order_by(Category.display_order.asc(), Category.id.asc()).all()
+    return success(data=categories, message="Categories retrieved")
+
+
 @router.post("/categories")
+@limiter.limit("30/minute")
 def create_category(
+    request: Request,
     name: str = Form(...),
     description: Optional[str] = Form(None),
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Admin: Create category"""
-    slug = slugify(name)
+    slug = _normalize_slug(name)
     
     # Check if exists
     existing = db.query(Category).filter(Category.slug == slug).first()
@@ -451,8 +676,196 @@ def create_category(
     return success(data={"id": category.id}, message="Category created")
 
 
+@router.post("/categories/bulk")
+@limiter.limit("10/minute")
+def bulk_create_categories(
+    request: Request,
+    payload: BulkCategoryCreateRequest = Body(...),
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin: Bulk create categories with atomic transaction."""
+    if not payload.categories:
+        raise HTTPException(status_code=400, detail="categories list is required")
+
+    normalized_items = []
+    duplicate_payload_slugs = set()
+    duplicate_payload_names = set()
+    seen_slugs = set()
+    seen_names = set()
+
+    for category in payload.categories:
+        normalized_slug = _normalize_slug(category.slug or category.name)
+        normalized_name = category.name.strip()
+        if not normalized_name:
+            raise HTTPException(status_code=400, detail="Category name cannot be empty")
+
+        if normalized_slug in seen_slugs:
+            duplicate_payload_slugs.add(normalized_slug)
+        seen_slugs.add(normalized_slug)
+
+        lower_name = normalized_name.lower()
+        if lower_name in seen_names:
+            duplicate_payload_names.add(normalized_name)
+        seen_names.add(lower_name)
+
+        normalized_items.append(
+            {
+                "name": normalized_name,
+                "slug": normalized_slug,
+                "display_order": category.display_order,
+                "description": category.description,
+                "image_url": category.image_url,
+                "is_active": category.is_active,
+            }
+        )
+
+    if duplicate_payload_slugs:
+        duplicates = ", ".join(sorted(duplicate_payload_slugs))
+        raise HTTPException(status_code=409, detail=f"Duplicate slugs in request: {duplicates}")
+    if duplicate_payload_names:
+        duplicates = ", ".join(sorted(duplicate_payload_names))
+        raise HTTPException(status_code=409, detail=f"Duplicate names in request: {duplicates}")
+
+    slugs = [item["slug"] for item in normalized_items]
+    names = [item["name"] for item in normalized_items]
+    existing_categories = db.query(Category).filter(
+        (Category.slug.in_(slugs)) | (Category.name.in_(names))
+    ).all()
+
+    if existing_categories:
+        existing_slugs = sorted({item.slug for item in existing_categories if item.slug in slugs})
+        existing_names = sorted({item.name for item in existing_categories if item.name in names})
+        details = []
+        if existing_slugs:
+            details.append(f"slugs: {', '.join(existing_slugs)}")
+        if existing_names:
+            details.append(f"names: {', '.join(existing_names)}")
+        raise HTTPException(status_code=409, detail=f"Categories already exist ({'; '.join(details)})")
+
+    categories = [
+        Category(
+            name=item["name"],
+            slug=item["slug"],
+            display_order=item["display_order"],
+            description=item["description"],
+            image_url=item["image_url"],
+            is_active=item["is_active"],
+        )
+        for item in normalized_items
+    ]
+
+    try:
+        for category in categories:
+            db.add(category)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return success(
+        data={
+            "created_count": len(categories),
+            "categories": [{"id": category.id, "name": category.name, "slug": category.slug} for category in categories],
+        },
+        message="Categories created successfully",
+    )
+
+
+@router.put("/categories/{category_id}")
+@limiter.limit("30/minute")
+def update_category(
+    request: Request,
+    category_id: int,
+    name: Optional[str] = Form(None),
+    slug: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    image_url: Optional[str] = Form(None),
+    display_order: Optional[int] = Form(None),
+    is_active: Optional[bool] = Form(None),
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin: Update category fields and enforce slug uniqueness."""
+    category = db.query(Category).filter(Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    if name is not None:
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise HTTPException(status_code=400, detail="Category name cannot be empty")
+        duplicate_name = db.query(Category).filter(
+            Category.id != category_id,
+            Category.name == normalized_name,
+        ).first()
+        if duplicate_name:
+            raise HTTPException(status_code=409, detail="Category name already exists")
+        category.name = normalized_name
+
+    slug_source = None
+    if slug is not None:
+        slug_source = slug
+    elif name is not None:
+        slug_source = name
+
+    if slug_source is not None:
+        normalized_slug = _normalize_slug(slug_source)
+        duplicate_slug = db.query(Category).filter(
+            Category.id != category_id,
+            Category.slug == normalized_slug,
+        ).first()
+        if duplicate_slug:
+            raise HTTPException(status_code=409, detail="Category slug already exists")
+        category.slug = normalized_slug
+
+    if description is not None:
+        category.description = description
+    if image_url is not None:
+        category.image_url = image_url
+    if display_order is not None:
+        category.display_order = display_order
+    if is_active is not None:
+        category.is_active = is_active
+
+    db.commit()
+    db.refresh(category)
+
+    return success(data={"id": category.id, "slug": category.slug}, message="Category updated")
+
+
+@router.delete("/categories/{category_id}")
+@limiter.limit("20/minute")
+def delete_category(
+    request: Request,
+    category_id: int,
+    hard_delete: bool = Query(False),
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin: Deactivate or delete a category if no products are linked."""
+    category = db.query(Category).filter(Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    existing_product = db.query(Product.id).filter(Product.category_id == category_id).first()
+    if existing_product:
+        raise HTTPException(status_code=409, detail="Cannot delete category while products are assigned")
+
+    if hard_delete:
+        db.delete(category)
+        db.commit()
+        return success(message="Category deleted")
+
+    category.is_active = False
+    db.commit()
+    return success(message="Category deactivated")
+
+
 @router.post("/occasions")
+@limiter.limit("30/minute")
 def create_occasion(
+    request: Request,
     name: str = Form(...),
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
@@ -475,7 +888,9 @@ def create_occasion(
 # ============= ANALYTICS =============
 
 @router.get("/analytics")
+@limiter.limit("60/minute")
 def get_analytics(
+    request: Request,
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
@@ -543,7 +958,9 @@ def get_analytics(
 # app/api/v1/admin.py
 
 @router.post("/products/bulk-upload")
+@limiter.limit("10/minute")
 async def bulk_upload_products(
+    request: Request,
     file: UploadFile = File(...),
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
@@ -558,47 +975,64 @@ async def bulk_upload_products(
     
     created = []
     errors = []
+    category_exists_cache = {}
     
     for row in reader:
+        row_number = reader.line_num
         try:
             # Validate required fields
             required = ['name', 'category_id', 'base_price']
             missing = [f for f in required if not row.get(f)]
             if missing:
-                errors.append(f"Row {reader.line_num}: Missing {missing}")
+                errors.append(f"Row {row_number}: Missing {missing}")
                 continue
-            
-            # Create product
-            slug = slugify(row['name'])
-            product = Product(
-                name=row['name'],
-                slug=slug,
-                category_id=int(row['category_id']),
-                base_price=float(row['base_price']),
-                sale_price=float(row['sale_price']) if row.get('sale_price') else None,
-                description=row.get('description'),
-                fabric=row.get('fabric'),
-                is_featured=row.get('is_featured', '').lower() == 'true'
-            )
-            db.add(product)
-            db.flush()
-            
-            # Add variants if provided
-            if row.get('sizes'):
-                sizes = row['sizes'].split(',')
-                for size in sizes:
-                    variant = ProductVariant(
-                        product_id=product.id,
-                        size=size.strip(),
-                        sku=f"{slug}-{size.strip()}".upper(),
-                        stock_quantity=int(row.get('stock', 0))
-                    )
-                    db.add(variant)
-            
+
+            try:
+                category_id = int(row["category_id"])
+            except ValueError:
+                errors.append(f"Row {row_number}: category_id must be an integer")
+                continue
+
+            if category_id not in category_exists_cache:
+                category_exists_cache[category_id] = (
+                    db.query(Category.id).filter(Category.id == category_id).first() is not None
+                )
+            if not category_exists_cache[category_id]:
+                errors.append(f"Row {row_number}: Invalid category_id {category_id}")
+                continue
+
+            resolved_category_id, _ = _resolve_product_category(db, category_id)
+
+            with db.begin_nested():
+                slug = slugify(row['name'])
+                product = Product(
+                    name=row['name'],
+                    slug=slug,
+                    category_id=resolved_category_id,
+                    base_price=float(row['base_price']),
+                    sale_price=float(row['sale_price']) if row.get('sale_price') else None,
+                    description=row.get('description'),
+                    fabric=row.get('fabric'),
+                    is_featured=row.get('is_featured', '').lower() == 'true'
+                )
+                db.add(product)
+                db.flush()
+
+                # Add variants if provided
+                if row.get('sizes'):
+                    sizes = row['sizes'].split(',')
+                    for size in sizes:
+                        variant = ProductVariant(
+                            product_id=product.id,
+                            size=size.strip(),
+                            sku=f"{slug}-{size.strip()}".upper(),
+                            stock_quantity=int(row.get('stock', 0))
+                        )
+                        db.add(variant)
+
             created.append(product.name)
-            
         except Exception as e:
-            errors.append(f"Row {reader.line_num}: {str(e)}")
+            errors.append(f"Row {row_number}: {str(e)}")
     
     db.commit()
     
@@ -614,7 +1048,9 @@ async def bulk_upload_products(
 
 
 @router.get("/orders/export")
+@limiter.limit("20/minute")
 def export_orders(
+    request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     status: Optional[str] = None,

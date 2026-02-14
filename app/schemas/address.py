@@ -22,6 +22,13 @@ class AddressBase(BaseModel):
             raise ValueError('Pincode must be 6 digits')
         return v
 
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v):
+        if not re.match(r'^[6-9]\d{9}$', v):
+            raise ValueError('Phone must be a valid Indian mobile number')
+        return v
+
 
 class AddressCreate(AddressBase):
     pass
@@ -36,6 +43,20 @@ class AddressUpdate(BaseModel):
     state: Optional[str] = None
     pincode: Optional[str] = None
     is_default: Optional[bool] = None
+
+    @field_validator('pincode')
+    @classmethod
+    def validate_pincode(cls, v):
+        if v is not None and not re.match(r'^\d{6}$', v):
+            raise ValueError('Pincode must be 6 digits')
+        return v
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v):
+        if v is not None and not re.match(r'^[6-9]\d{9}$', v):
+            raise ValueError('Phone must be a valid Indian mobile number')
+        return v
 
 
 class AddressResponse(AddressBase):

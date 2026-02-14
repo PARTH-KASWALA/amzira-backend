@@ -59,6 +59,7 @@ class Product(Base):
     wishlist_items = relationship("Wishlist", back_populates="product", cascade="all, delete-orphan")
 
 # Composite indexes for performance
+Index('ix_products_category_id', Product.category_id)
 Index('idx_product_category_active', Product.category_id, Product.is_active)
 Index('idx_product_price_range', Product.sale_price, Product.base_price)
 

@@ -1,15 +1,15 @@
-from pydantic import BaseModel
-from typing import List
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
 
 class CartItemCreate(BaseModel):
     product_id: int
-    variant_id: int
-    quantity: int = 1
+    variant_id: Optional[int] = None
+    quantity: int = Field(default=1, ge=1, le=10)
 
 
 class CartItemUpdate(BaseModel):
-    quantity: int
+    quantity: int = Field(..., ge=1, le=10)
 
 
 class CartItemResponse(BaseModel):

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, field_validator, Field, AliasChoices
 from typing import Optional
 from datetime import datetime
 import re
@@ -29,13 +29,13 @@ class UserCreate(UserBase):
     @field_validator('phone')
     @classmethod
     def validate_phone(cls, v):
-        if v and not re.match(r'^\d{10}$', v):
-            raise ValueError('Phone must be 10 digits')
+        if v and not re.match(r'^[6-9]\d{9}$', v):
+            raise ValueError('Phone must be a valid Indian mobile number')
         return v
 
 
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: EmailStr = Field(validation_alias=AliasChoices("email", "username"))
     password: str
 
 
@@ -53,3 +53,10 @@ class UserResponse(UserBase):
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v):
+        if v and not re.match(r'^[6-9]\d{9}$', v):
+            raise ValueError('Phone must be a valid Indian mobile number')
+        return v

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.db.session import get_db
@@ -9,12 +9,15 @@ from app.models.product import Product, ProductVariant
 from app.schemas.cart import CartItemCreate, CartItemUpdate, CartResponse
 from app.core.exceptions import ProductNotFound, InsufficientStock
 from app.utils.response import success
+from app.core.rate_limiter import limiter
 
 router = APIRouter()
 
 
 @router.get("/", response_model=dict)
+@limiter.limit("60/minute")
 def get_cart(
+    request: Request,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -67,12 +70,20 @@ def get_cart(
 )
 
 @router.post("/items", status_code=status.HTTP_201_CREATED)
+@limiter.limit("30/minute")
 def add_to_cart(
+    request: Request,
     cart_item: CartItemCreate,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Add item to cart (authenticated users only)"""
+    if cart_item.variant_id is None or cart_item.variant_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="variant_id is required and must be selected",
+        )
+
     # Verify product exists
     product = db.query(Product).filter(
         Product.id == cart_item.product_id,
@@ -145,7 +156,9 @@ def add_to_cart(
 
 
 @router.put("/items/{item_id}")
+@limiter.limit("30/minute")
 def update_cart_item(
+    request: Request,
     item_id: int,
     update_data: CartItemUpdate,
     current_user: User = Depends(get_current_active_user),
@@ -175,7 +188,9 @@ def update_cart_item(
 
 
 @router.delete("/items/{item_id}")
+@limiter.limit("30/minute")
 def remove_from_cart(
+    request: Request,
     item_id: int,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
@@ -199,7 +214,9 @@ def remove_from_cart(
 
 
 @router.delete("/")
+@limiter.limit("20/minute")
 def clear_cart(
+    request: Request,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -208,4 +225,3 @@ def clear_cart(
     db.commit()
     
     return success(message="Cart cleared")
-
