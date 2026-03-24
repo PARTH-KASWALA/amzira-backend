@@ -1,8 +1,14 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator, model_validator
 from typing import List, Optional
+from pathlib import Path
 import json
 import ipaddress
+from dotenv import load_dotenv
+
+
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(ENV_FILE)
 
 
 class Settings(BaseSettings):
@@ -27,9 +33,17 @@ class Settings(BaseSettings):
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
         "https://amzira.com",
         "https://www.amzira.com"
     ]
+
+    # Commerce pricing
+    GST_RATE: float = 0.18
+    FREE_SHIPPING_THRESHOLD: float = 2000.0
+    DEFAULT_SHIPPING_CHARGE: float = 100.0
     
     # Email
     SMTP_HOST: str = "smtp.gmail.com"
@@ -58,6 +72,19 @@ class Settings(BaseSettings):
     
     # Monitoring (Optional - Add to .env for production)
     SENTRY_DSN: str = ""  # Optional: Sentry error tracking DSN
+
+    # Shiprocket
+    SHIPROCKET_EMAIL: str = ""
+    SHIPROCKET_PASSWORD: str = ""
+    SHIPROCKET_BASE_URL: str = "https://apiv2.shiprocket.in/v1/external"
+    SHIPROCKET_CHANNEL_ID: str = ""
+    SHIPROCKET_PICKUP_LOCATION: str = "Primary"
+    SHIPROCKET_DEFAULT_WEIGHT_KG: float = 0.5
+    SHIPROCKET_DEFAULT_LENGTH_CM: int = 10
+    SHIPROCKET_DEFAULT_BREADTH_CM: int = 10
+    SHIPROCKET_DEFAULT_HEIGHT_CM: int = 5
+    SHIPROCKET_TOKEN_TTL_SECONDS: int = 864000
+    SHIPROCKET_MAX_RETRIES: int = 3
 
 
     # Celery & Redis (Task Queue)
@@ -116,6 +143,25 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid proxy IP address: {ip}") from exc
         return ",".join(normalized)
 
+    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
+    @classmethod
+    def validate_cors_origins(cls, value):
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("BACKEND_CORS_ORIGINS must be valid JSON or comma-separated origins") from exc
+                if isinstance(parsed, list):
+                    return [str(origin).strip().rstrip("/") for origin in parsed if str(origin).strip()]
+            return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+        if isinstance(value, list):
+            return [str(origin).strip().rstrip("/") for origin in value if str(origin).strip()]
+        return value
+
     @model_validator(mode="after")
     def validate_production_admin_ips(self):
         if self.ENVIRONMENT == "production" and not self.admin_allowed_ips:
@@ -126,6 +172,8 @@ class Settings(BaseSettings):
                 raise ValueError("SECRET_KEY must be at least 32 chars and not use placeholders in production")
             if (self.RAZORPAY_KEY_ID or "").startswith("rzp_test_"):
                 raise ValueError("RAZORPAY_KEY_ID must use live key in production")
+            if any(origin == "*" for origin in self.BACKEND_CORS_ORIGINS):
+                raise ValueError("BACKEND_CORS_ORIGINS cannot contain '*' in production")
         return self
 
     @property
@@ -144,7 +192,7 @@ class Settings(BaseSettings):
         return ip in self.trusted_proxy_ips
 
     model_config = {
-        "env_file": ".env",
+        "env_file": str(ENV_FILE),
         "case_sensitive": True,
         "extra": "ignore",
     }

@@ -142,6 +142,16 @@ def get_current_active_user(
     return current_user
 
 
+def get_current_user_optional(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> User | None:
+    try:
+        return get_current_user(request=request, db=db)
+    except HTTPException:
+        return None
+
+
 def require_admin(
     request: Request,
     current_user: User = Depends(get_current_user),

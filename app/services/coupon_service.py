@@ -202,7 +202,7 @@ class CouponService:
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Order not found",
                 )
-            if order.status != OrderStatus.PENDING:
+            if order.status not in {OrderStatus.PLACED, OrderStatus.PENDING}:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Cannot apply coupon to non-pending order",

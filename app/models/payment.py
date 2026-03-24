@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Enum, Text
+from sqlalchemy import Column, Integer, String, Numeric, ForeignKey, DateTime, Enum, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -26,7 +26,7 @@ class Payment(Base):
     payment_method = Column(Enum(PaymentMethod), nullable=False)
     payment_status = Column(Enum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False)
     
-    amount = Column(Float, nullable=False)
+    amount = Column(Numeric(10, 2), nullable=False)
     currency = Column(String(3), default="INR", nullable=False)
     
     # Gateway-specific fields

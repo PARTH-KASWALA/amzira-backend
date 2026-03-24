@@ -57,7 +57,6 @@ def _create_product_variant(db: Session, stock_quantity: int) -> ProductVariant:
         slug=f"product-{stock_quantity}",
         base_price=1000.0,
         sale_price=None,
-        total_stock=stock_quantity,
         is_active=True,
         is_featured=False,
     )
@@ -253,3 +252,54 @@ def test_order_creation_is_idempotent_with_same_key(client: TestClient, db_sessi
     payload = second_response.json()
     assert payload["message"] == "Order already exists"
     assert payload["data"]["order_number"] == first_order_number
+
+
+def test_get_orders_returns_empty_list(client: TestClient, db_session: Session):
+    user = _create_user(db_session, "orders-empty@example.com", "9876543218")
+
+    _login(client, user.email)
+    response = client.get("/api/v1/orders/")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["message"] == "Orders retrieved"
+    assert payload["data"] == []
+
+
+def test_get_orders_returns_created_orders(client: TestClient, db_session: Session):
+    user = _create_user(db_session, "orders-list@example.com", "9876543219")
+    address = _create_address(db_session, user.id)
+    variant = _create_product_variant(db_session, stock_quantity=4)
+
+    db_session.add(
+        CartItem(
+            user_id=user.id,
+            product_id=variant.product_id,
+            variant_id=variant.id,
+            quantity=1,
+            price_at_addition=1000.0,
+        )
+    )
+    db_session.commit()
+
+    _login(client, user.email)
+    create_response = client.post(
+        "/api/v1/orders/",
+        headers=_csrf_headers(client),
+        json={
+            "shipping_address_id": address.id,
+            "billing_address_id": address.id,
+            "payment_method": "cod",
+            "idempotency_key": str(uuid4()),
+        },
+    )
+    assert create_response.status_code == 201
+    created_order_number = create_response.json()["data"]["order_number"]
+
+    response = client.get("/api/v1/orders/")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["message"] == "Orders retrieved"
+    assert len(payload["data"]) == 1
+    assert payload["data"][0]["order_number"] == created_order_number

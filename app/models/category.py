@@ -13,7 +13,7 @@ class Category(Base):
     description = Column(String(500))
     image_url = Column(String(500))
     is_active = Column(Boolean, default=True)
-    display_order = Column(Integer, default=0)
+    display_order = Column(Integer, default=0, server_default="0", nullable=False)
 
     # Relationships
     parent = relationship("Category", remote_side=[id], back_populates="children")

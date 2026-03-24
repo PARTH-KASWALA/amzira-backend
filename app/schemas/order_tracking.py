@@ -32,8 +32,12 @@ class OrderTrackingResponse(BaseModel):
     current_status: str
     tracking_number: Optional[str]
     carrier_name: Optional[str]
+    courier_name: Optional[str] = None
+    shipment_id: Optional[str] = None
+    tracking_url: Optional[str] = None
     estimated_delivery_date: Optional[datetime]
     status_history: List[OrderStatusHistoryResponse]
+    timeline: List[dict] = []
 
     class Config:
         from_attributes = True

@@ -74,7 +74,6 @@ def _create_product_bundle(
         slug=f"product-{suffix}",
         base_price=1200.0,
         sale_price=999.0,
-        total_stock=stock,
         is_active=True,
         is_featured=False,
     )

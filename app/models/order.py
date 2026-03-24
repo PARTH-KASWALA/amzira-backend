@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Enum, Text, Boolean
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -6,11 +6,15 @@ from app.db.base_class import Base
 
 
 class OrderStatus(str, enum.Enum):
+    PLACED = "placed"
     PENDING = "pending"
     CONFIRMED = "confirmed"
     PROCESSING = "processing"
     SHIPPED = "shipped"
+    OUT_FOR_DELIVERY = "out_for_delivery"
     DELIVERED = "delivered"
+    RETURN_REQUESTED = "return_requested"
+    RETURNED = "returned"
     CANCELLED = "cancelled"
     REFUNDED = "refunded"
 
@@ -23,21 +27,32 @@ class Order(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     # Pricing
-    subtotal = Column(Float, nullable=False)
-    tax_amount = Column(Float, default=0.0)
-    shipping_charge = Column(Float, default=0.0)
-    discount_amount = Column(Float, default=0.0)
+    subtotal = Column(Numeric(10, 2), nullable=False)
+    tax_amount = Column(Numeric(10, 2), default=0.0)
+    shipping_charge = Column(Numeric(10, 2), default=0.0)
+    discount_amount = Column(Numeric(10, 2), default=0.0)
     coupon_code = Column(String(50), nullable=True)
-    total_amount = Column(Float, nullable=False)
+    total_amount = Column(Numeric(10, 2), nullable=False)
     
     # Status & Tracking
-    status = Column(Enum(OrderStatus), default=OrderStatus.PENDING, nullable=False, index=True)
+    status = Column(Enum(OrderStatus), default=OrderStatus.PLACED, nullable=False, index=True)
     expires_at = Column(DateTime, nullable=True, index=True)
     stock_deducted = Column(Boolean, default=False, nullable=False)
     idempotency_key = Column(String(64), unique=True, nullable=True, index=True)
     tracking_number = Column(String(100), nullable=True)
     carrier_name = Column(String(100), nullable=True)  # e.g., "FedEx", "UPS", "India Post"
+    courier_name = Column(String(100), nullable=True)
+    shiprocket_order_id = Column(String(100), nullable=True, index=True)
+    shipment_id = Column(String(100), nullable=True, index=True)
+    awb_code = Column(String(100), nullable=True, index=True)
+    tracking_url = Column(String(500), nullable=True)
+    current_location = Column(String(255), nullable=True)
+    shiprocket_last_status = Column(String(100), nullable=True)
+    pickup_scheduled_at = Column(DateTime, nullable=True)
     estimated_delivery_date = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    return_deadline = Column(DateTime(timezone=True), nullable=True)
+    return_status = Column(String(20), nullable=False, default="not_applicable", server_default="not_applicable")
     
     # Address (store IDs for reference)
     shipping_address_id = Column(Integer, ForeignKey("addresses.id"), nullable=False)
@@ -77,8 +92,8 @@ class OrderItem(Base):
     variant_details = Column(String(100), nullable=False)  # "Size: L, Color: Gold"
     
     quantity = Column(Integer, nullable=False)
-    unit_price = Column(Float, nullable=False)
-    total_price = Column(Float, nullable=False)
+    unit_price = Column(Numeric(10, 2), nullable=False)
+    total_price = Column(Numeric(10, 2), nullable=False)
 
     # Relationships
     order = relationship("Order", back_populates="items")

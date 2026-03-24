@@ -16,7 +16,7 @@ from slowapi.middleware import SlowAPIMiddleware
 import time
 import structlog
 import uuid
-from sqlalchemy import func
+from sqlalchemy import func, inspect, text
 from sqlalchemy.orm import Session
 
 from app.core.logging import configure_logging
@@ -25,10 +25,13 @@ from app.core.celery_app import celery_app
 from app.core.exceptions import APIError
 from app.core.rate_limiter import limiter
 from app.db.session import SessionLocal, engine, get_db
+from app.db.base_class import Base
 from app.models.category import Category
+from app.models.checkout_payment_intent import CheckoutPaymentIntent
 from app.models.product import Product, Occasion, product_occasions
 from app.models.user import User, UserRole
-from app.api.v1 import auth, products, cart, orders, users, payments, admin, reviews, wishlist, coupons, returns, stock, categories
+from app.api.v1 import auth, products, cart, orders, users, payments, admin, reviews, wishlist, coupons, returns, stock, categories, commerce_checkout, webhooks
+from app.services.shiprocket import validate_shiprocket_configuration
 
 API_VERSION = "1.0.0"
 SOFT_LAUNCH_REQUIREMENTS = [
@@ -119,9 +122,162 @@ def validate_production_admin_bootstrap():
             "Create an admin user before starting the API."
         )
 
+
+@app.on_event("startup")
+def ensure_checkout_payment_intent_table():
+    """
+    Create the payment-intent table if it is missing.
+    This keeps checkout working in environments where migrations
+    have not yet been applied for the new payment-first flow.
+    """
+    Base.metadata.create_all(bind=engine, tables=[CheckoutPaymentIntent.__table__])
+
+
+@app.on_event("startup")
+def ensure_orders_return_columns():
+    """
+    Keep legacy local databases compatible with the current Order model.
+    This avoids hard 500s on environments where the return-window migration
+    has not been applied yet.
+    """
+    inspector = inspect(engine)
+    if "orders" not in inspector.get_table_names():
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("orders")}
+    statements = []
+
+    if "delivered_at" not in existing_columns:
+        statements.append(
+            "ALTER TABLE orders ADD COLUMN delivered_at TIMESTAMP WITH TIME ZONE"
+        )
+    if "return_deadline" not in existing_columns:
+        statements.append(
+            "ALTER TABLE orders ADD COLUMN return_deadline TIMESTAMP WITH TIME ZONE"
+        )
+    if "return_status" not in existing_columns:
+        statements.append(
+            "ALTER TABLE orders ADD COLUMN return_status VARCHAR(20) DEFAULT 'not_applicable' NOT NULL"
+        )
+    if "courier_name" not in existing_columns:
+        statements.append("ALTER TABLE orders ADD COLUMN courier_name VARCHAR(100)")
+    if "shiprocket_order_id" not in existing_columns:
+        statements.append("ALTER TABLE orders ADD COLUMN shiprocket_order_id VARCHAR(100)")
+    if "shipment_id" not in existing_columns:
+        statements.append("ALTER TABLE orders ADD COLUMN shipment_id VARCHAR(100)")
+    if "awb_code" not in existing_columns:
+        statements.append("ALTER TABLE orders ADD COLUMN awb_code VARCHAR(100)")
+    if "tracking_url" not in existing_columns:
+        statements.append("ALTER TABLE orders ADD COLUMN tracking_url VARCHAR(500)")
+    if "current_location" not in existing_columns:
+        statements.append("ALTER TABLE orders ADD COLUMN current_location VARCHAR(255)")
+    if "shiprocket_last_status" not in existing_columns:
+        statements.append("ALTER TABLE orders ADD COLUMN shiprocket_last_status VARCHAR(100)")
+    if "pickup_scheduled_at" not in existing_columns:
+        statements.append("ALTER TABLE orders ADD COLUMN pickup_scheduled_at TIMESTAMP")
+
+    if not statements:
+        statements = []
+
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+    if "return_requests" not in inspector.get_table_names():
+        return
+
+    return_columns = {column["name"] for column in inspector.get_columns("return_requests")}
+    return_statements = []
+    if "shiprocket_return_order_id" not in return_columns:
+        return_statements.append("ALTER TABLE return_requests ADD COLUMN shiprocket_return_order_id VARCHAR(100)")
+    if "shiprocket_return_shipment_id" not in return_columns:
+        return_statements.append("ALTER TABLE return_requests ADD COLUMN shiprocket_return_shipment_id VARCHAR(100)")
+    if "return_awb_code" not in return_columns:
+        return_statements.append("ALTER TABLE return_requests ADD COLUMN return_awb_code VARCHAR(100)")
+    if "return_tracking_url" not in return_columns:
+        return_statements.append("ALTER TABLE return_requests ADD COLUMN return_tracking_url VARCHAR(500)")
+    if "return_courier_name" not in return_columns:
+        return_statements.append("ALTER TABLE return_requests ADD COLUMN return_courier_name VARCHAR(100)")
+
+    if return_statements:
+        with engine.begin() as connection:
+            for statement in return_statements:
+                connection.execute(text(statement))
+
+
+@app.on_event("startup")
+def normalize_legacy_order_statuses():
+    """
+    Keep the PostgreSQL orderstatus enum aligned with the current application model
+    and normalize legacy `PENDING` rows to `PLACED`.
+    """
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_type t
+                            JOIN pg_enum e ON t.oid = e.enumtypid
+                            WHERE t.typname = 'orderstatus' AND e.enumlabel = 'PLACED'
+                        ) THEN
+                            ALTER TYPE orderstatus ADD VALUE 'PLACED';
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_type t
+                            JOIN pg_enum e ON t.oid = e.enumtypid
+                            WHERE t.typname = 'orderstatus' AND e.enumlabel = 'OUT_FOR_DELIVERY'
+                        ) THEN
+                            ALTER TYPE orderstatus ADD VALUE 'OUT_FOR_DELIVERY';
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_type t
+                            JOIN pg_enum e ON t.oid = e.enumtypid
+                            WHERE t.typname = 'orderstatus' AND e.enumlabel = 'RETURN_REQUESTED'
+                        ) THEN
+                            ALTER TYPE orderstatus ADD VALUE 'RETURN_REQUESTED';
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_type t
+                            JOIN pg_enum e ON t.oid = e.enumtypid
+                            WHERE t.typname = 'orderstatus' AND e.enumlabel = 'RETURNED'
+                        ) THEN
+                            ALTER TYPE orderstatus ADD VALUE 'RETURNED';
+                        END IF;
+
+                    END $$;
+                    """
+                )
+            )
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    UPDATE orders
+                    SET status = 'PLACED'::orderstatus
+                    WHERE status = 'PENDING'::orderstatus
+                    """
+                )
+            )
+    except Exception:
+        # Startup should not fail on enum normalization; the compatibility model
+        # still accepts legacy rows if this update cannot run.
+        pass
+
 # --------------------------------------------------
 # RATE LIMITING SETUP
 # --------------------------------------------------
+validate_shiprocket_configuration(strict=settings.ENVIRONMENT == "production")
+
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -136,33 +292,29 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 # --------------------------------------------------
 # CORS MIDDLEWARE
 # --------------------------------------------------
-cors_origins = list(settings.BACKEND_CORS_ORIGINS)
-# Always include the configured frontend origin (exact match required for cookies).
-if settings.FRONTEND_URL and settings.FRONTEND_URL not in cors_origins:
-    cors_origins.append(settings.FRONTEND_URL)
-# Temporary dev mode CORS; restrict in production
-if settings.ENVIRONMENT != "production":
-    for origin in [
-        "null",
-        "http://127.0.0.1:5500",
-        "http://localhost:5500",
-        "http://localhost:3000",
-        "http://127.0.0.1:8000",
-    ]:
-        if origin not in cors_origins:
-            cors_origins.append(origin)
+cors_origins: list[str] = []
+for origin in [
+    *settings.BACKEND_CORS_ORIGINS,
+    settings.FRONTEND_URL,
+    "http://127.0.0.1:5500",
+    "http://localhost:5500",
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+]:
+    normalized_origin = (origin or "").strip().rstrip("/")
+    if not normalized_origin:
+        continue
+    if settings.ENVIRONMENT == "production" and normalized_origin == "*":
+        continue
+    if normalized_origin not in cors_origins:
+        cors_origins.append(normalized_origin)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization",
-        "X-CSRF-Token",
-        "X-Requested-With",
-    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["X-Process-Time"],
     max_age=3600,
 )
@@ -283,6 +435,8 @@ app.include_router(wishlist.router, prefix=f"{settings.API_V1_STR}/wishlist", ta
 app.include_router(coupons.router, prefix=f"{settings.API_V1_STR}/coupons", tags=["Coupons"])
 app.include_router(returns.router, prefix=f"{settings.API_V1_STR}/returns", tags=["Returns"])
 app.include_router(stock.router, prefix=f"{settings.API_V1_STR}/stock", tags=["Stock"])
+app.include_router(webhooks.router, prefix=settings.API_V1_STR, tags=["Webhooks"])
+app.include_router(commerce_checkout.router, tags=["Commerce Checkout"])
 
 # --------------------------------------------------
 # HEALTH CHECK ENDPOINT
@@ -512,10 +666,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 from app.middleware.csrf import verify_csrf_token
 
 CSRF_EXEMPT_PATHS = {
+    "/verify-payment",
     "/api/v1/auth/login",
     "/api/v1/auth/register",
     "/api/v1/auth/refresh",
     "/api/v1/auth/logout",
+    "/api/v1/webhooks/razorpay",
 }
 CSRF_PROTECTED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 

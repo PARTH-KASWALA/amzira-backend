@@ -11,6 +11,7 @@ os.environ["ENVIRONMENT"] = "development"
 
 import app.models  # noqa: F401
 import app.models.return_request  # noqa: F401
+from app.core.config import settings
 from app.db.base_class import Base
 from app.db.session import get_db
 from app.main import app
@@ -27,7 +28,7 @@ def db_session() -> Generator[Session, None, None]:
     )
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-    test_tables = [table for table in Base.metadata.sorted_tables if table.name != "return_requests"]
+    test_tables = list(Base.metadata.sorted_tables)
     Base.metadata.create_all(bind=engine, tables=test_tables)
     session = TestingSessionLocal()
     try:
@@ -41,6 +42,11 @@ def db_session() -> Generator[Session, None, None]:
 
 @pytest.fixture()
 def client(db_session: Session) -> Generator[TestClient, None, None]:
+    original_shiprocket_email = settings.SHIPROCKET_EMAIL
+    original_shiprocket_password = settings.SHIPROCKET_PASSWORD
+    settings.SHIPROCKET_EMAIL = ""
+    settings.SHIPROCKET_PASSWORD = ""
+
     def override_get_db():
         try:
             yield db_session
@@ -52,3 +58,5 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+    settings.SHIPROCKET_EMAIL = original_shiprocket_email
+    settings.SHIPROCKET_PASSWORD = original_shiprocket_password

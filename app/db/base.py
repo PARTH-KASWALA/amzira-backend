@@ -14,5 +14,6 @@ from app.models.order import Order
 # from app.models.order_item import OrderItem
 # from app.models.cart_item import CartItem
 from app.models.payment import Payment
+from app.models.checkout_payment_intent import CheckoutPaymentIntent
 # from app.models.product_occasion import ProductOccasion
 from app.models.token_blacklist import TokenBlacklist

@@ -16,6 +16,10 @@ def _normalize(value: str) -> str:
     return str(value or "").strip().lower().replace(" ", "-")
 
 
+def _coalesce_int(value: int | None, default: int = 0) -> int:
+    return default if value is None else value
+
+
 def _classify_audience(category: Category) -> str:
     slug = _normalize(category.slug)
     name = _normalize(category.name)
@@ -102,7 +106,7 @@ def get_public_categories(
         if _normalize(category.slug) in l1_slugs:
             l1 = ensure_l1(_normalize(category.slug), category.name)
             l1["id"] = category.id
-            l1["display_order"] = category.display_order
+            l1["display_order"] = _coalesce_int(category.display_order)
             l1_by_category_id[category.id] = l1
 
     # Create missing L1 shells if not present
@@ -125,7 +129,7 @@ def get_public_categories(
             "slug": category.slug,
             "level": 2,
             "parent_id": l1["id"],
-            "display_order": category.display_order,
+            "display_order": _coalesce_int(category.display_order),
             "is_active": category.is_active,
             "children": []
         }
@@ -148,11 +152,14 @@ def get_public_categories(
 
     data = list(l1_nodes.values())
     for node in data:
-        node_children = sorted(node.get("children", []), key=lambda child: (child.get("display_order", 0), child.get("id", 0)))
+        node_children = sorted(
+            node.get("children", []),
+            key=lambda child: (_coalesce_int(child.get("display_order")), _coalesce_int(child.get("id"))),
+        )
         node["children"] = node_children
         node["subcategories"] = [
             {"id": child["id"], "name": child["name"], "slug": child["slug"]}
             for child in node_children
         ]
-    data.sort(key=lambda entry: entry.get("display_order", 0))
+    data.sort(key=lambda entry: _coalesce_int(entry.get("display_order")))
     return success(data=data, message="Categories retrieved")

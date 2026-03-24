@@ -24,7 +24,7 @@ def auto_cancel_pending_orders(db: Session) -> int:
     pending_orders: List[Order] = (
         db.query(Order)
         .filter(
-            Order.status == OrderStatus.PENDING
+            Order.status.in_([OrderStatus.PLACED, OrderStatus.PENDING])
         )
         .all()
     )
@@ -63,7 +63,7 @@ def auto_cancel_pending_orders(db: Session) -> int:
             "order_expired",
             order_id=order.id,
             user_id=order.user_id,
-            previous_status=OrderStatus.PENDING.value,
+            previous_status=order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
         )
         cancelled_count += 1
 

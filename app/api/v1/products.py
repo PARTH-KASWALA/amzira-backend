@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session, selectinload, joinedload
 from sqlalchemy import or_, and_
 from typing import Optional, List
 from datetime import datetime, timedelta
 import re
+import logging
 from app.db.session import get_db
 from app.models.product import Product, ProductImage, ProductVariant, Occasion
 from app.models.category import Category, Subcategory
@@ -11,11 +13,14 @@ from app.schemas.product import ProductListResponse, ProductDetailResponse, Cate
 from app.core.exceptions import ProductNotFound
 from app.utils.response import success
 from app.core.rate_limiter import limiter
+from app.core.cache import cache_get_json, cache_set_json
+from app.core.config import settings
 
 router = APIRouter()
 PINCODE_RE = re.compile(r"^\d{6}$")
 FREE_SHIPPING_THRESHOLD = 2000.0
 DEFAULT_SHIPPING_CHARGE = 100.0
+logger = logging.getLogger(__name__)
 
 
 @router.get("/categories", response_model=dict)
@@ -33,6 +38,8 @@ def get_products(
     request: Request,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
+    category_id: Optional[int] = Query(None, ge=1),
+    subcategory_id: Optional[int] = Query(None, ge=1),
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     occasion: Optional[str] = None,
@@ -40,12 +47,19 @@ def get_products(
     max_price: Optional[float] = None,
     search: Optional[str] = None,
     featured: Optional[bool] = None,
+    is_featured: Optional[bool] = Query(None, alias="is_featured"),
+    in_stock_only: Optional[bool] = Query(None, alias="in_stock_only"),
     sort_by: Optional[str] = Query(None, regex="^(price_asc|price_desc|newest|popular)$"),
     db: Session = Depends(get_db)
 ):
     """
     Get products with filtering and pagination
     """
+    cache_key = f"cache:products:list:{request.url.path}?{request.url.query}"
+    cached = cache_get_json(cache_key)
+    if cached:
+        return cached
+
     query = (
         db.query(Product)
         .options(
@@ -56,14 +70,18 @@ def get_products(
         .filter(Product.is_active == True)
     )
     
-    # Category filter
-    if category:
+    # Category filter (id takes precedence over slug)
+    if category_id:
+        query = query.filter(Product.category_id == category_id)
+    elif category:
         cat = db.query(Category).filter(Category.slug == category).first()
         if cat:
             query = query.filter(Product.category_id == cat.id)
     
-    # Subcategory filter
-    if subcategory:
+    # Subcategory filter (id takes precedence over slug)
+    if subcategory_id:
+        query = query.filter(Product.subcategory_id == subcategory_id)
+    elif subcategory:
         subcat = db.query(Subcategory).filter(Subcategory.slug == subcategory).first()
         if subcat:
             query = query.filter(Product.subcategory_id == subcat.id)
@@ -101,9 +119,14 @@ def get_products(
             )
         )
     
-    # Featured filter
-    if featured:
-        query = query.filter(Product.is_featured == True)
+    # Featured filter (is_featured takes precedence over featured)
+    featured_value = is_featured if is_featured is not None else featured
+    if featured_value is not None:
+        query = query.filter(Product.is_featured == featured_value)
+
+    # In-stock filter
+    if in_stock_only:
+        query = query.filter(Product.total_stock > 0)
     
     # Sorting
     if sort_by == "price_asc":
@@ -114,6 +137,12 @@ def get_products(
         query = query.order_by(Product.created_at.desc())
     else:
         query = query.order_by(Product.id.desc())
+
+    if settings.DEBUG:
+        try:
+            print(query.statement.compile(compile_kwargs={"literal_binds": True}))
+        except Exception:
+            logger.debug("products_query_compile_failed", exc_info=True)
     
     # Pagination
     total = query.count()
@@ -163,7 +192,7 @@ def get_products(
             "in_stock": in_stock
         })
     
-    return success(
+    response = success(
         data={
             "total": total,
             "page": page,
@@ -173,6 +202,8 @@ def get_products(
         },
         message="Products retrieved",
     )
+    cache_set_json(cache_key, jsonable_encoder(response), ttl_seconds=60)
+    return response
 
 
 @router.get("/category/{category_slug}")
@@ -205,6 +236,11 @@ def get_products_by_occasion(
 @limiter.limit("100/minute")
 def get_product_detail(request: Request, slug: str, db: Session = Depends(get_db)):
     """Get product details by slug."""
+    cache_key = f"cache:products:detail:{slug}"
+    cached = cache_get_json(cache_key)
+    if cached:
+        return cached
+
     product = (
         db.query(Product)
         .options(
@@ -262,7 +298,7 @@ def get_product_detail(request: Request, slug: str, db: Session = Depends(get_db
         for occ in product.occasions
     ]
 
-    return success(
+    response = success(
         data={
             "id": product.id,
             "name": product.name,
@@ -291,6 +327,8 @@ def get_product_detail(request: Request, slug: str, db: Session = Depends(get_db
         },
         message="Product retrieved",
     )
+    cache_set_json(cache_key, jsonable_encoder(response), ttl_seconds=120)
+    return response
 
 
 @router.get("/{slug}/delivery-estimate", response_model=dict)

@@ -5,9 +5,11 @@ from app.models.cart import CartItem
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.address import Address
 from app.models.payment import Payment, PaymentStatus, PaymentMethod
+from app.models.checkout_payment_intent import CheckoutPaymentIntent, CheckoutPaymentIntentStatus
 from app.models.review import Review
 from app.models.wishlist import Wishlist
 from app.models.coupon import Coupon
 from app.models.coupon_usage import CouponUsage
 from app.models.order_status_history import OrderStatusHistory
 from app.models.token_blacklist import TokenBlacklist
+from app.models.return_request import ReturnRequest, ReturnReason, ReturnStatus

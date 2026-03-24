@@ -19,7 +19,6 @@ def _create_variant(db: Session, *, slug_suffix: str, stock: int) -> ProductVari
         slug=f"stock-product-{slug_suffix}",
         base_price=999.0,
         sale_price=None,
-        total_stock=stock,
         is_active=True,
         is_featured=False,
     )

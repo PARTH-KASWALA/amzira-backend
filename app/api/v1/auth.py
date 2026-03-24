@@ -208,11 +208,9 @@ async def login(request: Request, db: Session = Depends(get_db)):
         )
 
     # Rotate session version to invalidate all previously issued tokens.
-    # In dev, keep session_version stable so Postman logins don't invalidate browser sessions.
-    if settings.ENVIRONMENT.lower() == "production":
-        user.session_version += 1
-        db.commit()
-        db.refresh(user)
+    user.session_version += 1
+    db.commit()
+    db.refresh(user)
 
     access_token = create_access_token(
         data={

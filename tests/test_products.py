@@ -21,7 +21,6 @@ def _create_product_with_images(db: Session) -> Product:
         description="Test product",
         base_price=1000.0,
         sale_price=None,
-        total_stock=0,
         is_active=True,
         is_featured=False,
     )
@@ -94,7 +93,6 @@ def test_product_detail_includes_rating_stock_and_variant_sku(client: TestClient
     product = _create_product_with_images(db_session)
     product.avg_rating = 4.7
     product.review_count = 12
-    product.total_stock = 3
     db_session.commit()
 
     response = client.get(f"/api/v1/products/{product.slug}")

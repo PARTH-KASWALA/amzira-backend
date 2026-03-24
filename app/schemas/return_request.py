@@ -1,21 +1,20 @@
 from pydantic import BaseModel
-from uuid import UUID
 from typing import Optional
 from app.models.return_request import ReturnReason, ReturnStatus
 
 
 class ReturnRequestCreate(BaseModel):
-    order_id: UUID
-    order_item_id: UUID
+    order_id: int
+    order_item_id: int
     reason: ReturnReason
     description: Optional[str] = None
 
 
 class ReturnRequestResponse(BaseModel):
-    id: UUID
-    order_id: UUID
-    order_item_id: UUID
-    user_id: UUID
+    id: int
+    order_id: int
+    order_item_id: int
+    user_id: int
     reason: ReturnReason
     status: ReturnStatus
     refund_amount: Optional[float] = None

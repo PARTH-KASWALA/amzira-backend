@@ -1,4 +1,20 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, Text, Table, Index
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+    select,
+    func,
+)
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.base_class import Base
@@ -29,8 +45,7 @@ class Product(Base):
     sale_price = Column(Float, nullable=True)
     discount_percentage = Column(Integer, default=0)
     
-    # Stock & Status
-    total_stock = Column(Integer, default=0, nullable=False)
+    # Status
     is_active = Column(Boolean, default=True, nullable=False)
     is_featured = Column(Boolean, default=False)
     
@@ -53,10 +68,28 @@ class Product(Base):
     category = relationship("Category", back_populates="products")
     subcategory = relationship("Subcategory", back_populates="products")
     images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
-    variants = relationship("ProductVariant", back_populates="product", cascade="all, delete-orphan")
+    variants = relationship(
+        "ProductVariant",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     occasions = relationship("Occasion", secondary=product_occasions, back_populates="products")
     reviews = relationship("Review", back_populates="product", cascade="all, delete-orphan")
     wishlist_items = relationship("Wishlist", back_populates="product", cascade="all, delete-orphan")
+
+    @hybrid_property
+    def total_stock(self) -> int:
+        return sum((variant.stock_quantity or 0) for variant in self.variants)
+
+    @total_stock.expression
+    def total_stock(cls):
+        return (
+            select(func.coalesce(func.sum(ProductVariant.stock_quantity), 0))
+            .where(ProductVariant.product_id == cls.id)
+            .correlate(cls)
+            .scalar_subquery()
+        )
 
 # Composite indexes for performance
 Index('ix_products_category_id', Product.category_id)
@@ -68,7 +101,7 @@ class ProductImage(Base):
     __tablename__ = "product_images"
 
     id = Column(Integer, primary_key=True, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
     image_url = Column(String(500), nullable=False)
     alt_text = Column(String(200))
     display_order = Column(Integer, default=0)
@@ -81,13 +114,21 @@ class ProductImage(Base):
 class ProductVariant(Base):
     """Handles Size + Color + Stock per variant"""
     __tablename__ = "product_variants"
+    __table_args__ = (
+        CheckConstraint(
+            "stock_quantity >= 0",
+            name="ck_product_variants_stock_non_negative",
+        ),
+        UniqueConstraint("sku", name="uq_product_variants_sku"),
+        Index("ix_product_variants_product_id", "product_id"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
     
     size = Column(String(10), nullable=False)  # S, M, L, XL, XXL, 38, 40, etc.
     color = Column(String(50), nullable=True)  # Maroon, Gold, etc.
-    sku = Column(String(100), unique=True, nullable=False, index=True)
+    sku = Column(String(100), nullable=False)
     
     stock_quantity = Column(Integer, default=0, nullable=False)
     additional_price = Column(Float, default=0.0)  # Extra cost for this variant

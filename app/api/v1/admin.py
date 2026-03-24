@@ -13,6 +13,7 @@ from app.models.order import Order, OrderStatus
 from app.schemas.product import ProductCreate
 from app.services.order_service import auto_cancel_pending_orders
 from app.core.rate_limiter import limiter
+from app.core.cache import invalidate_product_cache
 from app.utils.image_upload import save_product_image, delete_product_image
 from app.utils.response import success
 
@@ -178,7 +179,8 @@ def create_product(
         discount_percentage=discount,
         fabric=fabric,
         care_instructions=care_instructions,
-        is_featured=is_featured
+        is_featured=is_featured,
+        is_active=True,
     )
     
     db.add(product)
@@ -223,6 +225,7 @@ def create_product(
     
     db.commit()
     db.refresh(product)
+    invalidate_product_cache(slugs=[product.slug])
     
     return success(
         data={"product_id": product.id, "slug": product.slug},
@@ -277,7 +280,8 @@ def update_product(
         product.is_active = is_active
     
     db.commit()
-    
+    invalidate_product_cache(slugs=[product.slug])
+
     return success(message="Product updated successfully")
 
 
@@ -298,7 +302,8 @@ def delete_product(
     # Soft delete (set inactive)
     product.is_active = False
     db.commit()
-    
+    invalidate_product_cache(slugs=[product.slug])
+
     return success(message="Product deleted successfully")
 
 
@@ -329,6 +334,7 @@ def bulk_update_product_category(
             synchronize_session=False,
         )
         db.commit()
+        invalidate_product_cache()
     except Exception:
         db.rollback()
         raise
@@ -436,11 +442,9 @@ def add_product_variant(
     
     db.add(variant)
     
-    # Update product total stock
-    product.total_stock = sum(v.stock_quantity for v in product.variants) + stock_quantity
-    
     db.commit()
-    
+    invalidate_product_cache(slugs=[product.slug])
+
     return success(data={"sku": sku}, message="Variant added successfully")
 
 
@@ -461,12 +465,10 @@ def update_variant_stock(
     
     variant.stock_quantity = stock_quantity
     
-    # Update product total stock
-    product = variant.product
-    product.total_stock = sum(v.stock_quantity for v in product.variants)
-    
     db.commit()
-    
+    product_slug = variant.product.slug if variant.product else None
+    invalidate_product_cache(slugs=[product_slug] if product_slug else None)
+
     return success(message="Stock updated successfully")
 
 
@@ -906,7 +908,7 @@ def get_analytics(
     total_orders = db.query(Order).count()
     
     # Pending orders
-    pending_orders = db.query(Order).filter(Order.status == OrderStatus.PENDING).count()
+    pending_orders = db.query(Order).filter(Order.status.in_([OrderStatus.PLACED, OrderStatus.PENDING])).count()
     
     # Total revenue
     total_revenue = db.query(func.sum(Order.total_amount)).filter(
