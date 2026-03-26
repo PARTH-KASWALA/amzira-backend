@@ -6,6 +6,7 @@ from app.core.security import hash_password
 from app.models.address import Address
 from app.models.cart import CartItem
 from app.models.category import Category
+from app.models.order import Order, OrderStatus
 from app.models.product import Product, ProductVariant
 from app.models.user import User
 
@@ -303,3 +304,32 @@ def test_get_orders_returns_created_orders(client: TestClient, db_session: Sessi
     assert payload["message"] == "Orders retrieved"
     assert len(payload["data"]) == 1
     assert payload["data"][0]["order_number"] == created_order_number
+
+
+def test_order_detail_requires_authenticated_owner(client: TestClient, db_session: Session):
+    owner = _create_user(db_session, "detail-owner@example.com", "9876543291")
+    other_user = _create_user(db_session, "detail-other@example.com", "9876543292")
+    address = _create_address(db_session, owner.id)
+
+    order = Order(
+        user_id=owner.id,
+        order_number="AMZDETAILSECURE1",
+        subtotal=1500.0,
+        tax_amount=0.0,
+        shipping_charge=0.0,
+        discount_amount=0.0,
+        total_amount=1500.0,
+        status=OrderStatus.CONFIRMED,
+        shipping_address_id=address.id,
+        billing_address_id=address.id,
+    )
+    db_session.add(order)
+    db_session.commit()
+    db_session.refresh(order)
+
+    anonymous_response = client.get(f"/api/v1/orders/{order.order_number}")
+    assert anonymous_response.status_code == 401
+
+    _login(client, other_user.email)
+    response = client.get(f"/api/v1/orders/{order.order_number}")
+    assert response.status_code == 404

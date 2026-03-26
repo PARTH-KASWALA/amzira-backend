@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     ]
 
     # Commerce pricing
-    GST_RATE: float = 0.18
+    GST_RATE: float = 0.05
     FREE_SHIPPING_THRESHOLD: float = 2000.0
     DEFAULT_SHIPPING_CHARGE: float = 100.0
     

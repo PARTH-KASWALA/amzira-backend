@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from typing import List
@@ -12,41 +14,48 @@ from app.utils.response import success
 from app.core.rate_limiter import limiter
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
-@router.get("/", response_model=dict)
-@limiter.limit("60/minute")
-def get_cart(
-    request: Request,
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
-):
-    """Get user's cart"""
-    cart_items = db.query(CartItem).filter(CartItem.user_id == current_user.id).all()
-    
+def _variant_additional_price(variant: ProductVariant | None) -> float:
+    return float(getattr(variant, "additional_price", 0.0) or 0.0)
+
+
+def _serialize_cart_for_user(db: Session, user_id: int) -> dict:
+    cart_items = db.query(CartItem).filter(CartItem.user_id == user_id).all()
+
     items_response = []
     subtotal = 0.0
-    
+
     for item in cart_items:
         product = item.product
         variant = item.variant
-        
-        # Get primary image
+        if not product or not variant:
+            logger.warning(
+                "cart_item_missing_relation",
+                extra={
+                    "user_id": user_id,
+                    "cart_item_id": item.id,
+                    "product_id": item.product_id,
+                    "variant_id": item.variant_id,
+                },
+            )
+            continue
+
         primary_image = next((img.image_url for img in product.images if img.is_primary), None)
         if not primary_image and product.images:
             primary_image = product.images[0].image_url
-        
-        # Calculate current price
-        current_price = product.sale_price if product.sale_price else product.base_price
-        current_price += variant.additional_price
-        
+
+        current_price = float(product.sale_price if product.sale_price else product.base_price)
+        current_price += _variant_additional_price(variant)
+
         total_price = current_price * item.quantity
         subtotal += total_price
-        
+
         variant_details = f"Size: {variant.size}"
         if variant.color:
             variant_details += f", Color: {variant.color}"
-        
+
         items_response.append({
             "id": item.id,
             "product_id": product.id,
@@ -60,14 +69,64 @@ def get_cart(
             "total_price": total_price,
             "stock_available": variant.stock_quantity
         })
-    
-    return success(
-    data={
+
+    return {
         "items": items_response,
         "subtotal": subtotal,
-        "total_items": len(cart_items),
+        "total_items": len(items_response),
     }
-)
+
+
+@router.get("/", response_model=dict)
+@limiter.limit("60/minute")
+def get_cart(
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get user's cart"""
+    try:
+        payload = _serialize_cart_for_user(db, current_user.id)
+        logger.info(
+            "cart_loaded_authenticated",
+            extra={"user_id": current_user.id, "item_count": payload["total_items"]},
+        )
+        return success(data=payload)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("cart_load_failed_authenticated", extra={"user_id": current_user.id})
+        raise
+
+
+@router.get("/user/{user_id}", response_model=dict)
+@limiter.limit("60/minute")
+def get_cart_by_user_id(
+    request: Request,
+    user_id: int,
+    db: Session = Depends(get_db)
+):
+    """Compatibility cart route for user-id based storefront flows."""
+    _ = request
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    try:
+        payload = _serialize_cart_for_user(db, user_id)
+        logger.info(
+            "cart_loaded_by_user_id",
+            extra={"user_id": user_id, "item_count": payload["total_items"]},
+        )
+        return success(data=payload)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("cart_load_failed_by_user_id", extra={"user_id": user_id})
+        raise
 
 @router.post("/items", status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/minute")
@@ -133,8 +192,8 @@ def add_to_cart(
         )
     
     # Calculate price
-    price = product.sale_price if product.sale_price else product.base_price
-    price += variant.additional_price
+    price = float(product.sale_price if product.sale_price else product.base_price)
+    price += _variant_additional_price(variant)
     
     # Add new item
     new_cart_item = CartItem(

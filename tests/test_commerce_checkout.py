@@ -61,6 +61,62 @@ def _login(client: TestClient, email: str, password: str = "StrongPass1") -> Non
     assert response.status_code == 200
 
 
+def _add_cart_item(
+    client: TestClient,
+    headers: dict,
+    variant: ProductVariant,
+    quantity: int,
+) -> dict:
+    response = client.post(
+        "/api/v1/cart/items",
+        headers=headers,
+        json={
+            "product_id": variant.product_id,
+            "variant_id": variant.id,
+            "quantity": quantity,
+        },
+    )
+    assert response.status_code in {200, 201}
+    return response.json()
+
+
+def _get_cart(client: TestClient) -> dict:
+    response = client.get("/api/v1/cart/")
+    assert response.status_code == 200
+    return response.json()["data"]
+
+
+def _create_address_via_api(
+    client: TestClient,
+    headers: dict,
+    *,
+    full_name: str,
+    phone: str,
+    address_line1: str,
+    city: str,
+    state: str,
+    pincode: str,
+    is_default: bool = True,
+) -> dict:
+    response = client.post(
+        "/api/v1/users/me/addresses",
+        headers=headers,
+        json={
+            "full_name": full_name,
+            "phone": phone,
+            "address_line1": address_line1,
+            "city": city,
+            "state": state,
+            "pincode": pincode,
+            "country": "India",
+            "address_type": "home",
+            "is_default": is_default,
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["data"]
+
+
 def _create_product_bundle(db: Session, suffix: str, stock: int = 5) -> ProductVariant:
     category = Category(name=f"Category {suffix}", slug=f"category-{suffix}", is_active=True)
     db.add(category)
@@ -113,39 +169,26 @@ def test_payment_verification_creates_order_and_clears_cart(
     _login(client, user.email)
     headers = _csrf_headers(client)
 
-    add_cart_response = client.post(
-        "/cart/add",
-        headers=headers,
-        json={"user_id": user.id, "product_id": variant.product_id, "quantity": 2},
-    )
-    assert add_cart_response.status_code == 200
-    assert add_cart_response.json()["success"] is True
+    add_cart_response = _add_cart_item(client, headers, variant, 2)
+    assert add_cart_response["success"] is True
 
-    cart_response = client.get(f"/cart/{user.id}")
-    assert cart_response.status_code == 200
-    cart_payload = cart_response.json()["data"]
+    cart_payload = _get_cart(client)
     assert len(cart_payload["items"]) == 1
     assert cart_payload["subtotal"] == 2400.0
-    assert cart_payload["tax"] == 432.0
-    assert cart_payload["total"] == 2832.0
 
-    address_response = client.post(
-        "/addresses",
-        headers=headers,
-        json={
-            "user_id": user.id,
-            "name": "Parth Kaswala",
-            "phone": "9876543210",
-            "address_line": "D-101 Gokuldham",
-            "city": "Surat",
-            "state": "Gujarat",
-            "pincode": "394101",
-        },
+    address_response = _create_address_via_api(
+        client,
+        headers,
+        full_name="Parth Kaswala",
+        phone="9876543210",
+        address_line1="D-101 Gokuldham",
+        city="Surat",
+        state="Gujarat",
+        pincode="394101",
     )
-    assert address_response.status_code == 201
-    address_id = address_response.json()["data"]["id"]
+    address_id = address_response["id"]
 
-    addresses_response = client.get(f"/addresses/{user.id}")
+    addresses_response = client.get("/api/v1/users/me/addresses")
     assert addresses_response.status_code == 200
     addresses = addresses_response.json()["data"]
     assert len(addresses) == 1
@@ -159,7 +202,17 @@ def test_payment_verification_creates_order_and_clears_cart(
     assert checkout_response.status_code == 200
     checkout_payload = checkout_response.json()["data"]
     assert checkout_payload["status"] == "validated"
-    assert checkout_payload["total"] == 2832.0
+    assert checkout_payload["total"] == 2520.0
+
+    prefixed_checkout_response = client.post(
+        "/api/v1/checkout",
+        headers=headers,
+        json={"user_id": user.id, "address_id": address_id},
+    )
+    assert prefixed_checkout_response.status_code == 200
+    prefixed_checkout_payload = prefixed_checkout_response.json()["data"]
+    assert prefixed_checkout_payload["status"] == "validated"
+    assert prefixed_checkout_payload["total"] == 2520.0
 
     monkeypatch.setattr(
         commerce_checkout,
@@ -175,8 +228,8 @@ def test_payment_verification_creates_order_and_clears_cart(
     assert payment_order_response.status_code == 200
     payment_order_payload = payment_order_response.json()["data"]
     assert payment_order_payload["razorpay_order_id"] == "order_test_checkout_123"
-    assert payment_order_payload["amount"] == 283200
-    assert payment_order_payload["total"] == 2832.0
+    assert payment_order_payload["amount"] == 252000
+    assert payment_order_payload["total"] == 2520.0
 
     created_intent = (
         db_session.query(CheckoutPaymentIntent)
@@ -213,13 +266,11 @@ def test_payment_verification_creates_order_and_clears_cart(
     assert verify_payload["order_status"] == "confirmed"
     assert verify_payload["order_id"] == verify_body["order_id"]
 
-    post_order_cart_response = client.get(f"/cart/{user.id}")
-    assert post_order_cart_response.status_code == 200
-    assert post_order_cart_response.json()["data"]["items"] == []
+    assert _get_cart(client)["items"] == []
 
     created_order = db_session.query(Order).filter(Order.id == verify_payload["order_id"]).first()
     assert created_order is not None
-    assert created_order.total_amount == 2832.0
+    assert created_order.total_amount == 2520.0
 
     payment = db_session.query(Payment).filter(Payment.order_id == created_order.id).first()
     assert payment is not None
@@ -240,26 +291,19 @@ def test_payment_verification_accepts_raw_razorpay_payload_without_checkout_cont
     _login(client, user.email)
     headers = _csrf_headers(client)
 
-    client.post(
-        "/cart/add",
-        headers=headers,
-        json={"user_id": user.id, "product_id": variant.product_id, "quantity": 1},
-    )
+    _add_cart_item(client, headers, variant, 1)
 
-    address_response = client.post(
-        "/addresses",
-        headers=headers,
-        json={
-            "user_id": user.id,
-            "name": "Raw Payload User",
-            "phone": "9876543210",
-            "address_line": "City Light",
-            "city": "Surat",
-            "state": "Gujarat",
-            "pincode": "394101",
-        },
+    address_response = _create_address_via_api(
+        client,
+        headers,
+        full_name="Raw Payload User",
+        phone="9876543210",
+        address_line1="City Light",
+        city="Surat",
+        state="Gujarat",
+        pincode="394101",
     )
-    address_id = address_response.json()["data"]["id"]
+    address_id = address_response["id"]
 
     monkeypatch.setattr(
         commerce_checkout,
@@ -306,26 +350,19 @@ def test_verify_payment_returns_existing_order_id_created_by_webhook(
     _login(client, user.email)
     headers = _csrf_headers(client)
 
-    client.post(
-        "/cart/add",
-        headers=headers,
-        json={"user_id": user.id, "product_id": variant.product_id, "quantity": 1},
-    )
+    _add_cart_item(client, headers, variant, 1)
 
-    address_response = client.post(
-        "/addresses",
-        headers=headers,
-        json={
-            "user_id": user.id,
-            "name": "Webhook User",
-            "phone": "9876543210",
-            "address_line": "Ring Road",
-            "city": "Surat",
-            "state": "Gujarat",
-            "pincode": "394101",
-        },
+    address_response = _create_address_via_api(
+        client,
+        headers,
+        full_name="Webhook User",
+        phone="9876543210",
+        address_line1="Ring Road",
+        city="Surat",
+        state="Gujarat",
+        pincode="394101",
     )
-    address_id = address_response.json()["data"]["id"]
+    address_id = address_response["id"]
 
     monkeypatch.setattr(
         commerce_checkout,
@@ -404,85 +441,61 @@ def test_address_creation_respects_default_switching(client: TestClient, db_sess
     _login(client, user.email)
     headers = _csrf_headers(client)
 
-    first = client.post(
-        "/addresses",
-        headers=headers,
-        json={
-            "user_id": user.id,
-            "name": "Home",
-            "phone": "9876543210",
-            "address_line": "Line 1",
-            "city": "Surat",
-            "state": "Gujarat",
-            "pincode": "394101",
-        },
+    first = _create_address_via_api(
+        client,
+        headers,
+        full_name="Home",
+        phone="9876543210",
+        address_line1="Line 1",
+        city="Surat",
+        state="Gujarat",
+        pincode="394101",
     )
-    assert first.status_code == 201
 
-    second = client.post(
-        "/addresses",
-        headers=headers,
-        json={
-            "user_id": user.id,
-            "name": "Office",
-            "phone": "9876543211",
-            "address_line": "Line 2",
-            "city": "Ahmedabad",
-            "state": "Gujarat",
-            "pincode": "380001",
-            "is_default": True,
-        },
+    second = _create_address_via_api(
+        client,
+        headers,
+        full_name="Office",
+        phone="9876543211",
+        address_line1="Line 2",
+        city="Ahmedabad",
+        state="Gujarat",
+        pincode="380001",
+        is_default=True,
     )
-    assert second.status_code == 201
 
-    addresses = client.get(f"/addresses/{user.id}").json()["data"]
+    addresses = client.get("/api/v1/users/me/addresses").json()["data"]
     assert len(addresses) == 2
-    assert addresses[0]["name"] == "Office"
-    assert addresses[0]["is_default"] is True
-    assert any(address["name"] == "Home" and address["is_default"] is False for address in addresses)
+    assert any(address["full_name"] == "Office" and address["is_default"] is True for address in addresses)
+    assert any(address["full_name"] == "Home" and address["is_default"] is False for address in addresses)
 
-
-def test_root_cart_update_and_delete_flow(client: TestClient, db_session: Session):
+def test_structured_cart_update_and_delete_flow(client: TestClient, db_session: Session):
     user = _create_user(db_session, "root-cart-update@example.com", "9876543333")
     variant = _create_product_bundle(db_session, "root-cart-update", stock=5)
     _login(client, user.email)
     headers = _csrf_headers(client)
 
-    add_response = client.post(
-        "/cart/add",
-        headers=headers,
-        json={
-            "user_id": user.id,
-            "product_id": variant.product_id,
-            "variant_id": variant.id,
-            "quantity": 1,
-        },
-    )
-    assert add_response.status_code == 200
-    cart_item_id = add_response.json()["data"]["cart_item_id"]
+    add_response = _add_cart_item(client, headers, variant, 1)
+    cart_item_id = add_response["data"]["cart_item_id"]
 
     update_response = client.put(
-        f"/cart/items/{cart_item_id}",
+        f"/api/v1/cart/items/{cart_item_id}",
         headers=headers,
-        json={"user_id": user.id, "quantity": 3},
+        json={"quantity": 3},
     )
     assert update_response.status_code == 200
-    assert update_response.json()["data"]["quantity"] == 3
 
-    cart_response = client.get(f"/cart/{user.id}")
-    assert cart_response.status_code == 200
-    cart_payload = cart_response.json()["data"]
+    cart_payload = _get_cart(client)
     assert cart_payload["items"][0]["variant_id"] == variant.id
     assert cart_payload["items"][0]["quantity"] == 3
 
     delete_response = client.delete(
-        f"/cart/items/{cart_item_id}",
+        f"/api/v1/cart/items/{cart_item_id}",
         headers=headers,
-        params={"user_id": user.id},
     )
     assert delete_response.status_code == 200
 
-    empty_cart = client.get(f"/cart/{user.id}").json()["data"]
+    empty_cart = _get_cart(client)
     assert empty_cart["items"] == []
 
 
@@ -500,3 +513,47 @@ def test_direct_order_creation_is_disabled(client: TestClient, db_session: Sessi
     payload = response.json()
     message = payload.get("detail") or payload.get("message") or str(payload)
     assert "disabled" in message.lower()
+
+
+def test_checkout_payment_endpoints_require_authenticated_ownership(
+    client: TestClient,
+    db_session: Session,
+):
+    user = _create_user(db_session, "ownership@example.com", "9876543391")
+    other_user = _create_user(db_session, "ownership-other@example.com", "9876543392")
+    variant = _create_product_bundle(db_session, "ownership", stock=4)
+
+    _login(client, user.email)
+    headers = _csrf_headers(client)
+
+    _add_cart_item(client, headers, variant, 1)
+
+    address = Address(
+        user_id=user.id,
+        full_name="Owner User",
+        phone="9876543210",
+        address_line1="Line 1",
+        city="Surat",
+        state="Gujarat",
+        pincode="395007",
+        country="India",
+        is_default=True,
+        address_type="home",
+    )
+    db_session.add(address)
+    db_session.commit()
+    db_session.refresh(address)
+
+    forbidden_checkout = client.post(
+        "/checkout",
+        headers=headers,
+        json={"user_id": other_user.id, "address_id": address.id},
+    )
+    assert forbidden_checkout.status_code == 403
+
+    forbidden_payment_order = client.post(
+        "/create-payment-order",
+        headers=headers,
+        json={"user_id": other_user.id, "address_id": address.id},
+    )
+    assert forbidden_payment_order.status_code == 403

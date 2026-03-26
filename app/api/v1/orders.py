@@ -577,10 +577,10 @@ def get_user_orders_by_id(
 def get_order_detail(
     request: Request,
     order_reference: str,
-    current_user: Optional[User] = Depends(get_current_user_optional),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Get order details and public tracking payload."""
+    """Get order details for the authenticated order owner."""
     try:
         order = _resolve_order_reference(
             db=db,
@@ -590,7 +590,7 @@ def get_order_detail(
         if not order:
             return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=_tracking_failed("Order not found"))
         if not _can_access_order(order, current_user):
-            return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content=_tracking_failed("Order not found"))
+            return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=_tracking_failed("Order not found"))
 
         refresh_return_status(order)
         db.commit()

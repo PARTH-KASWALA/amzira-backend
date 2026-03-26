@@ -22,10 +22,6 @@ from app.models.payment import Payment, PaymentMethod, PaymentStatus
 from app.models.product import Product, ProductVariant
 from app.models.user import User
 from app.schemas.commerce_checkout import (
-    AddressSummaryResponse,
-    CartAddRequest,
-    CartUpdateRequest,
-    CheckoutAddressCreate,
     CheckoutRequest,
     CreatePaymentOrderRequest,
     VerifyPaymentRequest,
@@ -54,99 +50,17 @@ def _get_user_or_404(db: Session, user_id: int) -> User:
     return user
 
 
-def _get_default_variant(product: Product) -> ProductVariant:
-    variants = [
-        variant for variant in product.variants
-        if variant.is_active and (variant.stock_quantity or 0) > 0
-    ]
-    if not variants:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Product is out of stock")
-    return sorted(variants, key=lambda variant: variant.id)[0]
-
-
-def _get_variant_or_404(db: Session, product_id: int, variant_id: int) -> ProductVariant:
-    variant = (
-        db.query(ProductVariant)
-        .filter(
-            ProductVariant.id == variant_id,
-            ProductVariant.product_id == product_id,
-            ProductVariant.is_active == True,
+def _ensure_user_owns_resource(current_user: User, user_id: int) -> None:
+    if current_user.id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to access this resource",
         )
-        .first()
-    )
-    if not variant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product variant not found")
-    return variant
 
 
 def _unit_price(product: Product, variant: ProductVariant) -> Decimal:
     base_price = product.sale_price if product.sale_price is not None else product.base_price
     return money(base_price) + money(variant.additional_price)
-
-
-def _build_cart_summary(db: Session, user_id: int) -> dict:
-    cart_items = (
-        db.query(CartItem)
-        .filter(CartItem.user_id == user_id)
-        .order_by(CartItem.created_at.asc(), CartItem.id.asc())
-        .all()
-    )
-
-    items = []
-    subtotal = money(0)
-    for cart_item in cart_items:
-        product = cart_item.product
-        variant = cart_item.variant
-        if not product or not variant:
-            continue
-
-        primary_image = next((img.image_url for img in product.images if img.is_primary), None)
-        if not primary_image and product.images:
-            primary_image = product.images[0].image_url
-
-        unit_price = _unit_price(product, variant)
-        total_price = money(unit_price * cart_item.quantity)
-        subtotal += total_price
-        variant_details = f"Size: {variant.size}"
-        if variant.color:
-            variant_details += f", Color: {variant.color}"
-        items.append(
-            {
-                "cart_item_id": cart_item.id,
-                "product_id": product.id,
-                "product_name": product.name,
-                "product_image": primary_image,
-                "variant_id": variant.id,
-                "variant_details": variant_details,
-                "quantity": cart_item.quantity,
-                "unit_price": money_float(unit_price),
-                "total_price": money_float(total_price),
-            }
-        )
-
-    tax = calculate_tax(subtotal)
-    total = money(subtotal + tax)
-    return {
-        "user_id": user_id,
-        "items": items,
-        "subtotal": money_float(subtotal),
-        "tax": money_float(tax),
-        "total": money_float(total),
-    }
-
-
-def _serialize_address(address: Address) -> dict:
-    return {
-        "id": address.id,
-        "user_id": address.user_id,
-        "name": address.full_name,
-        "phone": address.phone,
-        "address_line": address.address_line1,
-        "city": address.city,
-        "state": address.state,
-        "pincode": address.pincode,
-        "is_default": bool(address.is_default),
-    }
 
 
 def _get_address_or_404(db: Session, user_id: int, address_id: int) -> Address:
@@ -244,175 +158,14 @@ def _lock_variants_for_snapshot(db: Session, items: list[dict]) -> dict[int, Pro
     return locked_variants
 
 
-@router.post("/cart/add")
-def add_to_cart(
-    payload: CartAddRequest,
-    request: Request,
+@router.post("/checkout")
+@router.post("/api/v1/checkout")
+def validate_checkout(
+    payload: CheckoutRequest,
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    _ = request
-    _get_user_or_404(db, payload.user_id)
-
-    product = (
-        db.query(Product)
-        .filter(Product.id == payload.product_id, Product.is_active == True)
-        .first()
-    )
-    if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
-
-    variant = (
-        _get_variant_or_404(db, product.id, payload.variant_id)
-        if payload.variant_id
-        else _get_default_variant(product)
-    )
-    if variant.stock_quantity < payload.quantity:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Only {variant.stock_quantity} items left in stock",
-        )
-
-    cart_item = (
-        db.query(CartItem)
-        .filter(
-            CartItem.user_id == payload.user_id,
-            CartItem.product_id == payload.product_id,
-            CartItem.variant_id == variant.id,
-        )
-        .first()
-    )
-
-    if cart_item:
-        next_quantity = cart_item.quantity + payload.quantity
-        if variant.stock_quantity < next_quantity:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Only {variant.stock_quantity} items left in stock",
-            )
-        cart_item.quantity = next_quantity
-    else:
-        cart_item = CartItem(
-            user_id=payload.user_id,
-            product_id=payload.product_id,
-            variant_id=variant.id,
-            quantity=payload.quantity,
-            price_at_addition=_unit_price(product, variant),
-        )
-        db.add(cart_item)
-
-    db.commit()
-    db.refresh(cart_item)
-    return success(
-        data={
-            "cart_item_id": cart_item.id,
-            "product_id": product.id,
-            "variant_id": variant.id,
-            "quantity": cart_item.quantity,
-        },
-        message="Item added to cart",
-    )
-
-
-@router.get("/cart/{user_id}")
-def get_cart(user_id: int, db: Session = Depends(get_db)):
-    _get_user_or_404(db, user_id)
-    return success(data=_build_cart_summary(db, user_id), message="Cart retrieved")
-
-
-@router.put("/cart/items/{item_id}")
-def update_cart_item(item_id: int, payload: CartUpdateRequest, db: Session = Depends(get_db)):
-    _get_user_or_404(db, payload.user_id)
-
-    cart_item = (
-        db.query(CartItem)
-        .filter(CartItem.id == item_id, CartItem.user_id == payload.user_id)
-        .first()
-    )
-    if not cart_item:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cart item not found")
-
-    variant = cart_item.variant
-    if not variant or variant.stock_quantity < payload.quantity:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Insufficient stock")
-
-    cart_item.quantity = payload.quantity
-    db.commit()
-    db.refresh(cart_item)
-    return success(data={"cart_item_id": cart_item.id, "quantity": cart_item.quantity}, message="Cart updated")
-
-
-@router.delete("/cart/items/{item_id}")
-def delete_cart_item(item_id: int, user_id: int, db: Session = Depends(get_db)):
-    _get_user_or_404(db, user_id)
-
-    cart_item = (
-        db.query(CartItem)
-        .filter(CartItem.id == item_id, CartItem.user_id == user_id)
-        .first()
-    )
-    if not cart_item:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cart item not found")
-
-    db.delete(cart_item)
-    db.commit()
-    return success(message="Cart item removed")
-
-
-@router.post("/addresses", status_code=status.HTTP_201_CREATED)
-def add_address(payload: CheckoutAddressCreate, db: Session = Depends(get_db)):
-    _get_user_or_404(db, payload.user_id)
-
-    existing_addresses = (
-        db.query(Address)
-        .filter(Address.user_id == payload.user_id)
-        .order_by(Address.id.asc())
-        .all()
-    )
-
-    should_be_default = payload.is_default or len(existing_addresses) == 0
-    if should_be_default:
-        (
-            db.query(Address)
-            .filter(Address.user_id == payload.user_id, Address.is_default == True)
-            .update({"is_default": False})
-        )
-
-    address = Address(
-        user_id=payload.user_id,
-        full_name=payload.name,
-        phone=payload.phone,
-        address_line1=payload.address_line,
-        city=payload.city,
-        state=payload.state,
-        pincode=payload.pincode,
-        country="India",
-        is_default=should_be_default,
-        address_type="home",
-    )
-    db.add(address)
-    db.commit()
-    db.refresh(address)
-
-    return success(data=_serialize_address(address), message="Address created")
-
-
-@router.get("/addresses/{user_id}")
-def get_addresses(user_id: int, db: Session = Depends(get_db)):
-    _get_user_or_404(db, user_id)
-    addresses = (
-        db.query(Address)
-        .filter(Address.user_id == user_id)
-        .order_by(Address.is_default.desc(), Address.id.desc())
-        .all()
-    )
-    return success(
-        data=[_serialize_address(address) for address in addresses],
-        message="Addresses retrieved",
-    )
-
-
-@router.post("/checkout")
-def validate_checkout(payload: CheckoutRequest, db: Session = Depends(get_db)):
+    _ensure_user_owns_resource(current_user, payload.user_id)
     _get_user_or_404(db, payload.user_id)
     address = _get_address_or_404(db, payload.user_id, payload.address_id)
 
@@ -431,7 +184,13 @@ def validate_checkout(payload: CheckoutRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/create-payment-order")
-def create_payment_order(payload: CreatePaymentOrderRequest, db: Session = Depends(get_db)):
+@router.post("/api/v1/create-payment-order")
+def create_payment_order(
+    payload: CreatePaymentOrderRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_user_owns_resource(current_user, payload.user_id)
     _get_user_or_404(db, payload.user_id)
     user = _get_user_or_404(db, payload.user_id)
     address = _get_address_or_404(db, payload.user_id, payload.address_id)
@@ -526,6 +285,7 @@ def create_payment_order(payload: CreatePaymentOrderRequest, db: Session = Depen
 
 
 @router.post("/verify-payment", status_code=status.HTTP_201_CREATED)
+@router.post("/api/v1/verify-payment", status_code=status.HTTP_201_CREATED)
 def verify_payment(
     payload: VerifyPaymentRequest,
     current_user: User = Depends(get_current_active_user),
