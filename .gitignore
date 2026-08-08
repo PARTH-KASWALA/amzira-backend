@@ -7,6 +7,9 @@ __pycache__/
 venv/
 env/
 ENV/
+.venv/
+.venv-*/
+.venv*/
 
 # Environment
 .env
@@ -15,6 +18,8 @@ ENV/
 # Database
 *.db
 *.sqlite3
+*.rdb
+celerybeat-schedule*
 
 # Uploads
 static/uploads/*

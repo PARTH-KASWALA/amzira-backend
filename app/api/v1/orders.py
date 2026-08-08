@@ -8,6 +8,7 @@ from app.db.session import get_db
 from app.api.deps import get_current_active_user, get_current_user_optional, require_admin
 from app.models.user import User
 from app.models.order import Order, OrderItem, OrderStatus
+from app.models.payment import Payment, PaymentMethod, PaymentStatus
 from app.models.cart import CartItem
 from app.models.address import Address
 from app.models.return_request import ReturnRequest, ReturnReason
@@ -30,6 +31,7 @@ from app.services.order_tracking_service import build_status_timeline, normalize
 from app.core.pricing import calculate_shipping, calculate_tax, money
 from app.utils.response import success
 from app.core.cache import invalidate_product_cache
+from app.utils.order_utils import generate_order_number
 from app.core.rate_limiter import limiter
 import logging
 
@@ -267,6 +269,162 @@ def _can_access_order(order: Order, current_user: Optional[User]) -> bool:
     if current_user is None:
         return False
     return current_user.role.value == "admin" or order.user_id == current_user.id
+
+
+def _order_unit_price(product: Product, variant: ProductVariant) -> Decimal:
+    base_price = product.sale_price if product.sale_price is not None else product.base_price
+    return money(base_price) + money(variant.additional_price)
+
+
+def _variant_details(variant: ProductVariant) -> str:
+    details = f"Size: {variant.size}"
+    if variant.color:
+        details += f", Color: {variant.color}"
+    return details
+
+
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=dict)
+@limiter.limit("10/minute")
+def create_order(
+    request: Request,
+    order_data: OrderCreate,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Create a COD order from the authenticated user's cart."""
+    existing_order = (
+        _order_query(db)
+        .filter(Order.idempotency_key == order_data.idempotency_key)
+        .first()
+    )
+    if existing_order:
+        if existing_order.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Idempotency key already used",
+            )
+        return success(data=_serialize_order(existing_order), message="Order already created")
+
+    if order_data.payment_method != "cod":
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail="Use the checkout payment intent flow for Razorpay orders",
+        )
+
+    shipping_address = (
+        db.query(Address)
+        .filter(Address.id == order_data.shipping_address_id, Address.user_id == current_user.id)
+        .first()
+    )
+    billing_address = (
+        db.query(Address)
+        .filter(Address.id == order_data.billing_address_id, Address.user_id == current_user.id)
+        .first()
+    )
+    if not shipping_address or not billing_address:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Address not found")
+
+    cart_items = (
+        db.query(CartItem)
+        .options(joinedload(CartItem.product), joinedload(CartItem.variant))
+        .filter(CartItem.user_id == current_user.id)
+        .order_by(CartItem.id.asc())
+        .all()
+    )
+    if not cart_items:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cart is empty")
+
+    try:
+        subtotal = money(0)
+        order_items: list[OrderItem] = []
+        touched_product_slugs: set[str] = set()
+
+        for cart_item in cart_items:
+            product = cart_item.product
+            variant = (
+                db.query(ProductVariant)
+                .filter(ProductVariant.id == cart_item.variant_id, ProductVariant.product_id == cart_item.product_id)
+                .with_for_update()
+                .first()
+            )
+            if not product or not variant or not product.is_active or not variant.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cart contains unavailable items",
+                )
+            if variant.stock_quantity < cart_item.quantity:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Insufficient stock for {product.name}",
+                )
+
+            unit_price = _order_unit_price(product, variant)
+            line_total = money(unit_price * cart_item.quantity)
+            subtotal += line_total
+            variant.stock_quantity -= cart_item.quantity
+            touched_product_slugs.add(product.slug)
+            order_items.append(
+                OrderItem(
+                    product_id=product.id,
+                    variant_id=variant.id,
+                    product_name=product.name,
+                    variant_details=_variant_details(variant),
+                    quantity=cart_item.quantity,
+                    unit_price=unit_price,
+                    total_price=line_total,
+                )
+            )
+
+        shipping = calculate_shipping(subtotal)
+        tax = calculate_tax(subtotal + shipping)
+        total = money(subtotal + shipping + tax)
+        order = Order(
+            order_number=generate_order_number(db),
+            user_id=current_user.id,
+            subtotal=subtotal,
+            tax_amount=tax,
+            shipping_charge=shipping,
+            discount_amount=money(0),
+            total_amount=total,
+            status=OrderStatus.PLACED,
+            stock_deducted=True,
+            idempotency_key=order_data.idempotency_key,
+            shipping_address_id=shipping_address.id,
+            billing_address_id=billing_address.id,
+            customer_notes=order_data.customer_notes,
+        )
+        db.add(order)
+        db.flush()
+
+        for order_item in order_items:
+            order_item.order_id = order.id
+            db.add(order_item)
+
+        db.add(
+            Payment(
+                order_id=order.id,
+                payment_method=PaymentMethod.COD,
+                payment_status=PaymentStatus.PENDING,
+                amount=total,
+                currency="INR",
+            )
+        )
+        db.query(CartItem).filter(CartItem.user_id == current_user.id).delete(synchronize_session=False)
+        db.commit()
+        invalidate_product_cache(touched_product_slugs)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("order_create_failed user_id=%s", current_user.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create order",
+        )
+
+    created_order = _order_query(db).filter(Order.id == order.id).first()
+    return success(data=_serialize_order(created_order), message="Order created successfully")
 
 
 @router.get("/", response_model=dict)
@@ -620,7 +778,9 @@ def get_order_tracking(
         current_user=current_user,
         allow_public_numeric=True,
     )
-    if not order or not _can_access_order(order, current_user):
+    if not order:
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=_tracking_failed("Order not found"))
+    if current_user is not None and not _can_access_order(order, current_user):
         return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=_tracking_failed("Order not found"))
 
     live_tracking = None

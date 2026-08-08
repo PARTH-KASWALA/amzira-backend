@@ -551,6 +551,7 @@ CSRF_EXEMPT_PATHS = {
     "/api/v1/auth/refresh",
     "/api/v1/auth/logout",
     "/api/v1/webhooks/razorpay",
+    "/api/v1/shiprocket/webhook",
 }
 CSRF_PROTECTED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
