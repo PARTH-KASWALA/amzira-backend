@@ -1,6 +1,7 @@
 import os
 import uuid
 from io import BytesIO
+from urllib.parse import urlparse
 
 from fastapi import UploadFile, HTTPException
 from PIL import Image
@@ -13,6 +14,64 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 FORMAT_TO_MIME = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
+
+
+def _get_r2_client():
+    if not settings.r2_enabled:
+        return None
+    try:
+        import boto3  # type: ignore
+    except Exception as exc:
+        logger.warning("boto3_unavailable_for_r2", exc_info=exc)
+        return None
+
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.r2_endpoint_url,
+        aws_access_key_id=settings.R2_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.R2_SECRET_ACCESS_KEY,
+        region_name="auto",
+    )
+
+
+def _build_r2_object_url(key: str) -> str:
+    return f"{settings.R2_PUBLIC_URL.rstrip('/')}/{key}"
+
+
+def _upload_product_image_to_r2(data: bytes) -> str | None:
+    client = _get_r2_client()
+    if client is None:
+        return None
+
+    output = BytesIO()
+    with Image.open(BytesIO(data)) as img:
+        if img.mode in {"RGBA", "P"}:
+            img = img.convert("RGB")
+        img.save(output, format="WEBP", quality=85, optimize=True)
+    output.seek(0)
+
+    key = f"products/{uuid.uuid4().hex}.webp"
+    client.upload_fileobj(
+        output,
+        settings.R2_BUCKET_NAME,
+        key,
+        ExtraArgs={
+            "ContentType": "image/webp",
+            "CacheControl": "public, max-age=31536000",
+        },
+    )
+    return _build_r2_object_url(key)
+
+
+def _extract_r2_key(image_path: str) -> str | None:
+    if not settings.r2_enabled:
+        return None
+    public_url = settings.R2_PUBLIC_URL.rstrip("/")
+    if not image_path.startswith(public_url):
+        return None
+    parsed = urlparse(image_path)
+    key = parsed.path.lstrip("/")
+    return key or None
 
 
 def validate_image_upload(file: UploadFile) -> tuple[bytes, str]:
@@ -76,7 +135,11 @@ def save_product_image(file: UploadFile) -> str:
         logger.exception("Invalid image upload: %s", e)
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    # Create directory
+    remote_url = _upload_product_image_to_r2(data)
+    if remote_url:
+        return remote_url
+
+    # Fallback for local/dev environments.
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
     # Save file with safe unique name
@@ -107,8 +170,14 @@ def optimize_image(file_path: str, max_width: int = 1200, quality: int = 85):
 
 
 def delete_product_image(image_path: str):
-    """Delete image file from filesystem"""
+    """Delete image from R2 or local filesystem."""
     try:
+        r2_key = _extract_r2_key(image_path)
+        if r2_key:
+            client = _get_r2_client()
+            if client is not None:
+                client.delete_object(Bucket=settings.R2_BUCKET_NAME, Key=r2_key)
+            return
         path = image_path.lstrip('/')
         if os.path.exists(path):
             os.remove(path)

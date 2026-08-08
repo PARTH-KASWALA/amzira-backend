@@ -1,6 +1,6 @@
 from decimal import Decimal, ROUND_HALF_UP
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 import razorpay
 from pydantic import BaseModel
@@ -115,60 +115,9 @@ def create_payment_order(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Create Razorpay order for payment"""
-    order_id = payload.order_id
-    order = db.query(Order).filter(
-        Order.id == order_id,
-        Order.user_id == current_user.id
-    ).first()
-    
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order.status not in {OrderStatus.PLACED, OrderStatus.PENDING}:
-        raise HTTPException(status_code=400, detail="Payment can only be created for pending orders")
-    
-    # Amount in paise (multiply by 100)
-    amount_paise = _to_paise(order.total_amount)
-    
-    # Create Razorpay order
-    razorpay_order = razorpay_client.order.create({
-        "amount": amount_paise,
-        "currency": "INR",
-        "receipt": order.order_number,
-        "notes": {
-            "order_id": order.id,
-            "customer_email": current_user.email
-        }
-    })
-    
-    # Save payment record
-    payment = db.query(Payment).filter(Payment.order_id == order.id).first()
-    if payment and payment.payment_status == PaymentStatus.SUCCESS:
-        raise HTTPException(status_code=409, detail="Payment already processed")
-    if not payment:
-        payment = Payment(
-            order_id=order.id,
-            payment_method=PaymentMethod.RAZORPAY,
-            amount=order.total_amount,
-            currency="INR",
-            razorpay_order_id=razorpay_order["id"],
-            payment_status=PaymentStatus.PENDING,
-        )
-        db.add(payment)
-    else:
-        payment.razorpay_order_id = razorpay_order["id"]
-        payment.payment_status = PaymentStatus.PENDING
-    db.commit()
-    
-    return success(
-        data={
-            "razorpay_order_id": razorpay_order["id"],
-            "razorpay_key_id": settings.RAZORPAY_KEY_ID,
-            "amount": amount_paise,
-            "currency": "INR",
-            "order_number": order.order_number,
-        },
-        message="Payment order created",
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Use /create-payment-order commerce checkout endpoint instead.",
     )
 
 
@@ -180,65 +129,9 @@ def verify_payment(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Verify Razorpay payment signature"""
-    razorpay_order_id = payload.razorpay_order_id
-    razorpay_payment_id = payload.razorpay_payment_id
-    razorpay_signature = payload.razorpay_signature
-    if not razorpay_order_id or not razorpay_payment_id or not razorpay_signature:
-        raise _payment_error("PAYMENT_CANCELLED", "Payment was cancelled by user", 400)
-
-    # Find payment record
-    payment = (
-        db.query(Payment)
-        .filter(Payment.razorpay_order_id == razorpay_order_id)
-        .with_for_update()
-        .first()
-    )
-    
-    if not payment:
-        raise _payment_error("PAYMENT_CANCELLED", "Payment record not found", 404)
-    
-    # Verify order belongs to user
-    if payment.order.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    # Verify signature
-    if payment.payment_status == PaymentStatus.SUCCESS:
-        raise _payment_error("PAYMENT_FAILED", "Payment already processed", 409)
-    if payment.payment_status == PaymentStatus.FAILED:
-        raise _payment_error("PAYMENT_FAILED", "Payment failed. Please retry.", 400)
-
-    try:
-        order = process_verified_payment(
-            razorpay_order_id=razorpay_order_id,
-            razorpay_payment_id=razorpay_payment_id,
-            razorpay_signature=razorpay_signature,
-            db=db,
-        )
-    except HTTPException as exc:
-        db.rollback()
-        detail = exc.detail if isinstance(exc.detail, str) else "Payment processing failed"
-        if detail == "Invalid payment signature":
-            raise _payment_error("PAYMENT_VERIFICATION_FAILED", detail, 400)
-        if detail == "Payment record not found":
-            raise _payment_error("PAYMENT_CANCELLED", detail, 404)
-        if detail.startswith("Insufficient stock"):
-            raise _payment_error("PAYMENT_FAILED", detail, 400)
-        if detail == "Payment already marked failed":
-            raise _payment_error("PAYMENT_FAILED", "Payment failed. Please retry.", 400)
-        raise _payment_error("PAYMENT_FAILED", detail, exc.status_code)
-    except Exception:
-        db.rollback()
-        logger.exception("payment_verification_atomic_failure", payment_id=payment.id, order_id=payment.order_id)
-        raise _payment_error("PAYMENT_FAILED", "Payment processing failed", 500)
-    
-    return success(
-        data={
-            "order_number": order.order_number,
-            "payment_status": payment.payment_status.value,
-            "order_status": order.status.value,
-        },
-        message="Payment successful",
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Use /verify-payment commerce checkout endpoint instead.",
     )
 
 

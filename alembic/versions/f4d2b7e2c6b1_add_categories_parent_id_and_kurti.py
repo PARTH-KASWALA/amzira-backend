@@ -35,6 +35,28 @@ def upgrade() -> None:
         {"slug": "kurti"},
     ).fetchone()
     if not existing:
+        women = bind.execute(
+            sa.text("SELECT id FROM categories WHERE slug = :slug"),
+            {"slug": "women"},
+        ).fetchone()
+        if not women:
+            women = bind.execute(
+                sa.text(
+                    """
+                    INSERT INTO categories (name, slug, description, is_active, display_order)
+                    VALUES (:name, :slug, :description, :is_active, :display_order)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "name": "Women",
+                    "slug": "women",
+                    "description": "Women ethnic wear",
+                    "is_active": True,
+                    "display_order": 2,
+                },
+            ).fetchone()
+
         bind.execute(
             sa.text(
                 """
@@ -48,7 +70,7 @@ def upgrade() -> None:
                 "description": "Women kurti collection",
                 "is_active": True,
                 "display_order": 1,
-                "parent_id": 6,
+                "parent_id": women.id,
             },
         )
 
@@ -56,8 +78,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     bind.execute(
-        sa.text("DELETE FROM categories WHERE slug = :slug AND parent_id = :parent_id"),
-        {"slug": "kurti", "parent_id": 6},
+        sa.text("DELETE FROM categories WHERE slug = :slug"),
+        {"slug": "kurti"},
     )
 
     op.drop_constraint("fk_categories_parent_id", "categories", type_="foreignkey")

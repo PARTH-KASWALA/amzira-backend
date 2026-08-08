@@ -4,7 +4,7 @@ from uuid import uuid4
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.v1.orders import generate_order_number
+from app.utils.order_utils import generate_order_number
 from app.models.address import Address
 from app.models.cart import CartItem
 from app.models.checkout_payment_intent import (

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import time
 from dataclasses import dataclass
@@ -12,7 +14,7 @@ import httpx
 from app.core.cache import cache_get_json, cache_set_json
 from app.core.config import settings
 from app.models.order import Order, OrderStatus
-from app.models.return_request import ReturnRequest
+from app.models.return_request import ReturnRequest, ReturnStatus
 from app.services.return_service import mark_order_delivered
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,23 @@ def validate_shiprocket_configuration(*, strict: bool = False) -> bool:
         raise ShiprocketConfigurationError(message)
     logger.warning("shiprocket_configuration_missing")
     return False
+
+
+def verify_shiprocket_webhook_signature(body: bytes, signature: str | None) -> None:
+    secret = (settings.SHIPROCKET_WEBHOOK_SECRET or "").strip()
+    if not secret:
+        logger.warning("shiprocket_webhook_secret_missing")
+        return
+    if not signature:
+        raise ShiprocketAPIError("Missing Shiprocket webhook signature")
+
+    generated_signature = hmac.new(
+        secret.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(generated_signature, signature):
+        raise ShiprocketAPIError("Invalid Shiprocket webhook signature")
 
 
 def _build_order_items(order: Order) -> tuple[list[dict[str, Any]], Decimal]:
@@ -407,6 +426,9 @@ def track_awb(awb_code: str) -> ShiprocketShipmentResult:
 
 
 def create_return_shipment(order: Order, return_request: ReturnRequest) -> ShiprocketShipmentResult:
+    shipping = order.shipping_address
+    if shipping and shipping.pincode:
+        check_pincode_serviceability(shipping.pincode, cod=False)
     payload = _request("POST", "/orders/create/return", json_body=_build_return_payload(order, return_request))
     return _extract_tracking_fields(payload)
 
@@ -419,11 +441,49 @@ def sync_order_tracking(order: Order) -> ShiprocketShipmentResult | None:
     return tracking
 
 
+def check_pincode_serviceability(pincode: str, *, cod: bool = False) -> dict[str, Any]:
+    normalized_pincode = str(pincode or "").strip()
+    if not normalized_pincode:
+        raise ShiprocketConfigurationError("Delivery pincode is required for Shiprocket serviceability checks")
+
+    pickup_postcode = str(settings.SHIPROCKET_PICKUP_POSTCODE or "").strip()
+    if not pickup_postcode:
+        logger.warning("shiprocket_pickup_postcode_missing")
+        return {"serviceable": True, "skipped": True, "reason": "pickup_postcode_missing"}
+
+    payload = _request(
+        "GET",
+        "/courier/serviceability/",
+        params={
+            "pickup_postcode": pickup_postcode,
+            "delivery_postcode": normalized_pincode,
+            "cod": 1 if cod else 0,
+            "weight": settings.SHIPROCKET_DEFAULT_WEIGHT_KG,
+        },
+    )
+
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    available_couriers = data.get("available_courier_companies")
+    if isinstance(available_couriers, list):
+        serviceable = len(available_couriers) > 0
+    else:
+        serviceable = bool(data.get("serviceable", payload.get("serviceable", False)))
+
+    if not serviceable:
+        raise ShiprocketAPIError(
+            f"Delivery pincode {normalized_pincode} is not serviceable",
+            payload=payload if isinstance(payload, dict) else {},
+        )
+
+    return {"serviceable": True, "skipped": False, "payload": payload}
+
+
 def apply_tracking_update(order: Order, tracking: ShiprocketShipmentResult) -> None:
     if tracking.shiprocket_order_id:
         order.shiprocket_order_id = tracking.shiprocket_order_id
     if tracking.shipment_id:
         order.shipment_id = tracking.shipment_id
+        order.tracking_id = tracking.shipment_id
     if tracking.awb_code:
         order.awb_code = tracking.awb_code
         order.tracking_number = tracking.awb_code
@@ -439,11 +499,13 @@ def apply_tracking_update(order: Order, tracking: ShiprocketShipmentResult) -> N
     if tracking.current_status:
         normalized = str(tracking.current_status).strip().upper().replace(" ", "_").replace("-", "_")
         order.shiprocket_last_status = normalized
+        order.courier_status = normalized
         if normalized == "SHIPPED":
             order.status = OrderStatus.SHIPPED
         elif normalized == "OUT_FOR_DELIVERY":
             order.status = OrderStatus.OUT_FOR_DELIVERY
         elif normalized == "DELIVERED":
+            order.delivery_date = tracking.expected_delivery or _utc_now()
             mark_order_delivered(order)
 
 
@@ -454,6 +516,13 @@ def fulfill_order(order: Order) -> dict[str, Any]:
 
     if order.shipment_id and order.awb_code:
         return {"fulfilled": False, "reason": "already_fulfilled"}
+
+    shipping = order.shipping_address
+    if shipping and shipping.pincode:
+        check_pincode_serviceability(
+            shipping.pincode,
+            cod=bool(order.payment and getattr(order.payment.payment_method, "value", "") == "cod"),
+        )
 
     created = create_forward_shipment(order)
     apply_tracking_update(order, created)
@@ -495,3 +564,21 @@ def fulfill_order(order: Order) -> dict[str, Any]:
     result["shipment_id"] = order.shipment_id
     result["awb_code"] = order.awb_code
     return result
+
+
+def apply_return_tracking_update(return_request: ReturnRequest, payload: dict[str, Any]) -> ReturnRequest:
+    status_value = (
+        payload.get("status")
+        or payload.get("current_status")
+        or payload.get("shipment_status")
+        or payload.get("order_status")
+    )
+    normalized = str(status_value).strip().upper().replace(" ", "_").replace("-", "_") if status_value else None
+
+    return_request.return_courier_name = payload.get("courier_name") or return_request.return_courier_name
+    return_request.return_tracking_url = payload.get("tracking_url") or return_request.return_tracking_url
+    return_request.return_awb_code = payload.get("awb_code") or payload.get("awb") or return_request.return_awb_code
+
+    if normalized in {"PICKED", "PICKED_UP", "IN_TRANSIT", "OUT_FOR_DELIVERY", "DELIVERED"}:
+        return_request.status = ReturnStatus.PICKED_UP
+    return return_request

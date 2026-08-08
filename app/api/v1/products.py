@@ -1,20 +1,21 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy.orm import Session, selectinload, joinedload
-from sqlalchemy import or_, and_
-from typing import Optional, List
+from sqlalchemy.orm import Session
+from typing import Optional
 from datetime import datetime, timedelta
 import re
 import logging
 from app.db.session import get_db
-from app.models.product import Product, ProductImage, ProductVariant, Occasion
+from app.models.product import Product
 from app.models.category import Category, Subcategory
 from app.schemas.product import ProductListResponse, ProductDetailResponse, CategoryResponse
-from app.core.exceptions import ProductNotFound
 from app.utils.response import success
 from app.core.rate_limiter import limiter
-from app.core.cache import cache_get_json, cache_set_json
-from app.core.config import settings
+from app.services.product_service import (
+    get_product_delivery_estimate as service_get_product_delivery_estimate,
+    get_product_detail as service_get_product_detail,
+    list_products as service_list_products,
+)
 
 router = APIRouter()
 PINCODE_RE = re.compile(r"^\d{6}$")
@@ -43,6 +44,9 @@ def get_products(
     category: Optional[str] = None,
     subcategory: Optional[str] = None,
     occasion: Optional[str] = None,
+    fabric: Optional[str] = None,
+    color: Optional[str] = None,
+    size: Optional[str] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     search: Optional[str] = None,
@@ -55,154 +59,31 @@ def get_products(
     """
     Get products with filtering and pagination
     """
-    cache_key = f"cache:products:list:{request.url.path}?{request.url.query}"
-    cached = cache_get_json(cache_key)
-    if cached:
-        return cached
-
-    query = (
-        db.query(Product)
-        .options(
-            selectinload(Product.category),
-            selectinload(Product.images),
-            selectinload(Product.variants),
-        )
-        .filter(Product.is_active == True)
+    data = service_list_products(
+        db,
+        request,
+        page=page,
+        limit=limit,
+        category_id=category_id,
+        subcategory_id=subcategory_id,
+        category=category,
+        subcategory=subcategory,
+        occasion=occasion,
+        fabric=fabric,
+        color=color,
+        size=size,
+        min_price=min_price,
+        max_price=max_price,
+        search=search,
+        featured=featured,
+        is_featured=is_featured,
+        in_stock_only=in_stock_only,
+        sort_by=sort_by,
     )
-    
-    # Category filter (id takes precedence over slug)
-    if category_id:
-        query = query.filter(Product.category_id == category_id)
-    elif category:
-        cat = db.query(Category).filter(Category.slug == category).first()
-        if cat:
-            query = query.filter(Product.category_id == cat.id)
-    
-    # Subcategory filter (id takes precedence over slug)
-    if subcategory_id:
-        query = query.filter(Product.subcategory_id == subcategory_id)
-    elif subcategory:
-        subcat = db.query(Subcategory).filter(Subcategory.slug == subcategory).first()
-        if subcat:
-            query = query.filter(Product.subcategory_id == subcat.id)
-    
-    # Occasion filter
-    if occasion:
-        occ = db.query(Occasion).filter(Occasion.slug == occasion).first()
-        if occ:
-            query = query.filter(Product.occasions.contains(occ))
-    
-    # Price range filter
-    if min_price is not None:
-        query = query.filter(
-            or_(
-                Product.sale_price >= min_price,
-                and_(Product.sale_price == None, Product.base_price >= min_price)
-            )
-        )
-    
-    if max_price is not None:
-        query = query.filter(
-            or_(
-                Product.sale_price <= max_price,
-                and_(Product.sale_price == None, Product.base_price <= max_price)
-            )
-        )
-    
-    # Search filter
-    if search:
-        search_term = f"%{search}%"
-        query = query.filter(
-            or_(
-                Product.name.ilike(search_term),
-                Product.description.ilike(search_term)
-            )
-        )
-    
-    # Featured filter (is_featured takes precedence over featured)
-    featured_value = is_featured if is_featured is not None else featured
-    if featured_value is not None:
-        query = query.filter(Product.is_featured == featured_value)
-
-    # In-stock filter
-    if in_stock_only:
-        query = query.filter(Product.total_stock > 0)
-    
-    # Sorting
-    if sort_by == "price_asc":
-        query = query.order_by(Product.sale_price.asc().nullslast(), Product.base_price.asc())
-    elif sort_by == "price_desc":
-        query = query.order_by(Product.sale_price.desc().nullsfirst(), Product.base_price.desc())
-    elif sort_by == "newest":
-        query = query.order_by(Product.created_at.desc())
-    else:
-        query = query.order_by(Product.id.desc())
-
-    if settings.DEBUG:
-        try:
-            print(query.statement.compile(compile_kwargs={"literal_binds": True}))
-        except Exception:
-            logger.debug("products_query_compile_failed", exc_info=True)
-    
-    # Pagination
-    total = query.count()
-    products = query.offset((page - 1) * limit).limit(limit).all()
-    
-    # Format response
-    products_list = []
-    for product in products:
-        primary_image = next((img.image_url for img in product.images if img.is_primary), None)
-        if not primary_image and product.images:
-            primary_image = product.images[0].image_url
-        
-        active_variants = [variant for variant in product.variants if variant.is_active]
-        in_stock_variants = sorted(
-            [variant for variant in active_variants if variant.stock_quantity > 0],
-            key=lambda variant: variant.id,
-        )
-        default_variant = None
-        if in_stock_variants:
-            chosen = in_stock_variants[0]
-            default_variant = {
-                "variant_id": chosen.id,
-                "size": chosen.size,
-                "color": chosen.color,
-                "stock_quantity": chosen.stock_quantity,
-            }
-
-        stock_quantity = sum(v.stock_quantity for v in active_variants)
-        in_stock = stock_quantity > 0
-        
-        products_list.append({
-            "id": product.id,
-            "name": product.name,
-            "slug": product.slug,
-            "base_price": product.base_price,
-            "sale_price": product.sale_price,
-            "discount_percentage": product.discount_percentage,
-            "is_featured": product.is_featured,
-            "stock_quantity": stock_quantity,
-            "default_variant": default_variant,
-            "category": {
-                "id": product.category.id,
-                "name": product.category.name,
-                "slug": product.category.slug
-            },
-            "primary_image": primary_image,
-            "in_stock": in_stock
-        })
-    
     response = success(
-        data={
-            "total": total,
-            "page": page,
-            "limit": limit,
-            "total_pages": (total + limit - 1) // limit,
-            "products": products_list,
-        },
+        data=data,
         message="Products retrieved",
     )
-    cache_set_json(cache_key, jsonable_encoder(response), ttl_seconds=60)
     return response
 
 
@@ -236,98 +117,10 @@ def get_products_by_occasion(
 @limiter.limit("100/minute")
 def get_product_detail(request: Request, slug: str, db: Session = Depends(get_db)):
     """Get product details by slug."""
-    cache_key = f"cache:products:detail:{slug}"
-    cached = cache_get_json(cache_key)
-    if cached:
-        return cached
-
-    product = (
-        db.query(Product)
-        .options(
-            joinedload(Product.images),
-            joinedload(Product.category),
-            selectinload(Product.variants),
-            selectinload(Product.occasions),
-        )
-        .filter(
-            Product.slug == slug,
-            Product.is_active == True
-        )
-        .first()
-    )
-
-    if not product:
-        raise ProductNotFound()
-
-    primary_image = next((img.image_url for img in product.images if img.is_primary), None)
-    if not primary_image and product.images:
-        primary_image = product.images[0].image_url
-
-    in_stock = any(v.stock_quantity > 0 for v in product.variants)
-
-    images = [
-        {
-            "id": img.id,
-            "image_url": img.image_url,
-            "alt_text": img.alt_text,
-            "display_order": img.display_order,
-            "is_primary": img.is_primary
-        }
-        for img in sorted(product.images, key=lambda x: (not x.is_primary, x.display_order))
-    ]
-
-    variants = [
-        {
-            "id": v.id,
-            "size": v.size,
-            "color": v.color,
-            "sku": v.sku,
-            "stock_quantity": v.stock_quantity,
-            "additional_price": v.additional_price,
-            "is_active": v.is_active
-        }
-        for v in product.variants if v.is_active
-    ]
-
-    occasions = [
-        {
-            "id": occ.id,
-            "name": occ.name,
-            "slug": occ.slug
-        }
-        for occ in product.occasions
-    ]
-
     response = success(
-        data={
-            "id": product.id,
-            "name": product.name,
-            "slug": product.slug,
-            "description": product.description,
-            "base_price": product.base_price,
-            "sale_price": product.sale_price,
-            "discount_percentage": product.discount_percentage,
-            "is_featured": product.is_featured,
-            "total_stock": product.total_stock,
-            "avg_rating": product.avg_rating,
-            "review_count": product.review_count,
-            "fabric": product.fabric,
-            "care_instructions": product.care_instructions,
-            "category": {
-                "id": product.category.id,
-                "name": product.category.name,
-                "slug": product.category.slug,
-            },
-            "primary_image": primary_image,
-            "in_stock": in_stock,
-            "images": images,
-            "variants": variants,
-            "occasions": occasions,
-            "created_at": product.created_at,
-        },
+        data=service_get_product_detail(db, slug=slug),
         message="Product retrieved",
     )
-    cache_set_json(cache_key, jsonable_encoder(response), ttl_seconds=120)
     return response
 
 
@@ -343,40 +136,13 @@ def get_product_delivery_estimate(
     if not PINCODE_RE.match(str(pincode or "").strip()):
         raise HTTPException(status_code=400, detail="Pincode must be 6 digits")
 
-    product = (
-        db.query(Product)
-        .filter(
-            Product.slug == slug,
-            Product.is_active == True,
-        )
-        .first()
-    )
-    if not product:
-        raise ProductNotFound()
-
-    current_price = product.sale_price if product.sale_price is not None else product.base_price
-    shipping_cost = 0.0 if current_price >= FREE_SHIPPING_THRESHOLD else DEFAULT_SHIPPING_CHARGE
-
-    first_digit = pincode[0]
-    if first_digit in {"1", "2", "3", "4"}:
-        min_days, max_days, cod_available = 2, 4, True
-    elif first_digit in {"5", "6"}:
-        min_days, max_days, cod_available = 4, 6, True
-    elif first_digit in {"7", "8"}:
-        min_days, max_days, cod_available = 5, 7, True
-    else:
-        min_days, max_days, cod_available = 6, 8, False
-
-    today = datetime.utcnow().date()
     return success(
-        data={
-            "pincode": pincode,
-            "cod_available": cod_available,
-            "shipping_cost": shipping_cost,
-            "delivery_days_min": min_days,
-            "delivery_days_max": max_days,
-            "estimated_delivery_date_start": (today + timedelta(days=min_days)).isoformat(),
-            "estimated_delivery_date_end": (today + timedelta(days=max_days)).isoformat(),
-        },
+        data=service_get_product_delivery_estimate(
+            db,
+            slug=slug,
+            pincode=pincode,
+            free_shipping_threshold=FREE_SHIPPING_THRESHOLD,
+            default_shipping_charge=DEFAULT_SHIPPING_CHARGE,
+        ),
         message="Delivery estimate retrieved",
     )

@@ -4,9 +4,9 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_active_user, require_admin
 from app.core.config import settings
@@ -32,11 +32,11 @@ from app.services.checkout_payment_service import (
     get_payment_mapped_order,
     sync_intent_success,
 )
-from app.services.shiprocket import fulfill_order
 from app.services.payment_service import get_razorpay_client, verify_payment_signature
-from app.core.pricing import calculate_tax, money, money_float
+from app.services.shiprocket import check_pincode_serviceability, validate_shiprocket_configuration
+from app.tasks.order_tasks import dispatch_fulfill_order
+from app.core.pricing import calculate_shipping, calculate_tax, money, money_float
 from app.utils.response import success
-from app.api.v1.orders import generate_order_number
 
 
 router = APIRouter()
@@ -72,6 +72,18 @@ def _get_address_or_404(db: Session, user_id: int, address_id: int) -> Address:
     if not address:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Address not found")
     return address
+
+
+def _validate_serviceability_if_configured(address: Address, *, cod: bool = False) -> None:
+    if not address.pincode:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Delivery pincode is required")
+    if not validate_shiprocket_configuration(strict=False):
+        return
+    try:
+        check_pincode_serviceability(address.pincode, cod=cod)
+    except Exception as exc:
+        detail = str(exc) or "Delivery pincode is not serviceable"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
 def _get_cart_items_or_400(db: Session, user_id: int) -> list[CartItem]:
@@ -122,11 +134,14 @@ def _build_checkout_snapshot(cart_items: list[CartItem]) -> dict:
             }
         )
 
-    tax = calculate_tax(subtotal)
-    total = money(subtotal + tax)
+    shipping = calculate_shipping(subtotal)
+    tax = calculate_tax(subtotal + shipping)
+    total = money(subtotal + shipping + tax)
     return {
         "items": items,
         "subtotal": money_float(subtotal),
+        "shipping": money_float(shipping),
+        "shipping_amount": money_float(shipping),
         "tax": money_float(tax),
         "total": money_float(total),
     }
@@ -159,7 +174,6 @@ def _lock_variants_for_snapshot(db: Session, items: list[dict]) -> dict[int, Pro
 
 
 @router.post("/checkout")
-@router.post("/api/v1/checkout")
 def validate_checkout(
     payload: CheckoutRequest,
     current_user: User = Depends(get_current_active_user),
@@ -168,6 +182,7 @@ def validate_checkout(
     _ensure_user_owns_resource(current_user, payload.user_id)
     _get_user_or_404(db, payload.user_id)
     address = _get_address_or_404(db, payload.user_id, payload.address_id)
+    _validate_serviceability_if_configured(address, cod=False)
 
     cart_items = _get_cart_items_or_400(db, payload.user_id)
     cart_summary = _build_checkout_snapshot(cart_items)
@@ -184,7 +199,6 @@ def validate_checkout(
 
 
 @router.post("/create-payment-order")
-@router.post("/api/v1/create-payment-order")
 def create_payment_order(
     payload: CreatePaymentOrderRequest,
     current_user: User = Depends(get_current_active_user),
@@ -194,6 +208,7 @@ def create_payment_order(
     _get_user_or_404(db, payload.user_id)
     user = _get_user_or_404(db, payload.user_id)
     address = _get_address_or_404(db, payload.user_id, payload.address_id)
+    _validate_serviceability_if_configured(address, cod=False)
     cart_items = _get_cart_items_or_400(db, payload.user_id)
     snapshot = _build_checkout_snapshot(cart_items)
     _lock_variants_for_snapshot(db, snapshot["items"])
@@ -285,7 +300,6 @@ def create_payment_order(
 
 
 @router.post("/verify-payment", status_code=status.HTTP_201_CREATED)
-@router.post("/api/v1/verify-payment", status_code=status.HTTP_201_CREATED)
 def verify_payment(
     payload: VerifyPaymentRequest,
     current_user: User = Depends(get_current_active_user),
@@ -373,20 +387,7 @@ def verify_payment(
         db.rollback()
         raise
 
-    shiprocket_result = None
-    try:
-        shiprocket_result = fulfill_order(order)
-        if (
-            shiprocket_result.get("fulfilled")
-            or shiprocket_result.get("shipment_id")
-            or shiprocket_result.get("shiprocket_order_id")
-            or shiprocket_result.get("awb_code")
-        ):
-            db.commit()
-            db.refresh(order)
-    except Exception:
-        db.rollback()
-        logger.exception("checkout_shiprocket_fulfillment_failed order_id=%s", order.id)
+    dispatch_fulfill_order(order.id)
 
     response = success(
         data=build_checkout_payment_response(order, "Payment verified and order created"),
@@ -394,39 +395,45 @@ def verify_payment(
     )
     response["status"] = "success"
     response["order_id"] = order.id
-    response["data"]["shiprocket"] = shiprocket_result or {"fulfilled": False}
     return response
-
-
-@router.post("/orders")
-def create_order(_: CheckoutRequest, db: Session = Depends(get_db)):
-    _ = db
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Direct order creation is disabled. Complete payment verification first.",
-    )
-
 
 @router.get("/admin/orders")
 def admin_list_orders(
     request: Request,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    status_filter: str | None = Query(None),
     _: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     _ = request
-    orders = db.query(Order).order_by(Order.created_at.desc()).all()
+    query = (
+        db.query(Order)
+        .options(joinedload(Order.user))
+        .order_by(Order.created_at.desc())
+    )
+    if status_filter:
+        query = query.filter(Order.status == status_filter)
+    total = query.count()
+    orders = query.offset((page - 1) * limit).limit(limit).all()
     return success(
-        data=[
-            {
-                "order_id": order.id,
-                "order_number": order.order_number,
-                "user_id": order.user_id,
-                "customer_name": order.user.full_name if order.user else None,
-                "total_amount": float(order.total_amount),
-                "status": order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
-                "created_at": order.created_at,
-            }
-            for order in orders
-        ],
+        data={
+            "orders": [
+                {
+                    "order_id": order.id,
+                    "order_number": order.order_number,
+                    "user_id": order.user_id,
+                    "customer_name": order.user.full_name if order.user else None,
+                    "total_amount": float(order.total_amount),
+                    "status": order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
+                    "created_at": order.created_at,
+                }
+                for order in orders
+            ],
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "pages": (total + limit - 1) // limit,
+        },
         message="Orders retrieved",
     )

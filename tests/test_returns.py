@@ -8,13 +8,15 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import hash_password
+from app.api.v1 import webhooks
 from app.models.address import Address
 from app.models.category import Category
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.payment import Payment, PaymentMethod, PaymentStatus
 from app.models.product import Product, ProductVariant
-from app.models.return_request import ReturnRequest
+from app.models.return_request import ReturnRequest, ReturnStatus
 from app.models.user import User, UserRole
+from app.services import shiprocket
 from app.services.return_service import utc_now
 
 
@@ -216,7 +218,7 @@ def test_expired_return_window_is_rejected(client: TestClient, db_session: Sessi
     assert response.json()["message"] == "Return window expired"
 
 
-def test_public_order_tracking_by_order_number(client: TestClient, db_session: Session):
+def test_authenticated_order_detail_by_order_number(client: TestClient, db_session: Session):
     user = _create_user(db_session, "public-tracking@example.com", "9876543490")
     variant = _create_variant(db_session, "publictracking")
     order = _create_delivered_order(db_session, user.id, variant, "PUBTRACK")
@@ -224,6 +226,7 @@ def test_public_order_tracking_by_order_number(client: TestClient, db_session: S
     order.courier_name = "Shiprocket Express"
     db_session.commit()
 
+    _login(client, user.email)
     response = client.get(f"/api/v1/orders/{order.order_number}")
 
     assert response.status_code == 200
@@ -352,3 +355,183 @@ def test_delivered_order_cannot_move_back_to_processing(client: TestClient, db_s
 
     assert response.status_code == 400
     assert "Cannot transition order" in response.json()["message"]
+
+
+def test_shiprocket_webhook_updates_forward_delivery_status(client: TestClient, db_session: Session):
+    user = _create_user(db_session, "shiprocket-forward@example.com", "9876543410")
+    variant = _create_variant(db_session, "shiprocket-forward")
+    order = _create_delivered_order(db_session, user.id, variant, "SHIPROCKETFWD")
+    order.status = OrderStatus.SHIPPED
+    order.shipment_id = "ship-123"
+    order.awb_code = "awb-123"
+    db_session.commit()
+
+    secret = settings.SHIPROCKET_WEBHOOK_SECRET
+    settings.SHIPROCKET_WEBHOOK_SECRET = "shiprocket-test-secret"
+
+    payload = {
+        "shipment_id": "ship-123",
+        "awb_code": "awb-123",
+        "status": "out_for_delivery",
+        "courier_name": "Shiprocket Express",
+        "tracking_url": "https://tracking.example.com/fwd",
+        "current_location": "Surat Hub",
+    }
+    raw_body = json.dumps(payload).encode()
+    signature = hmac.new(
+        settings.SHIPROCKET_WEBHOOK_SECRET.encode(),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    response = client.post(
+        "/api/v1/shiprocket/webhook",
+        headers={
+            "X-Shiprocket-Signature": signature,
+            "Content-Type": "application/json",
+        },
+        content=raw_body,
+    )
+
+    settings.SHIPROCKET_WEBHOOK_SECRET = secret
+
+    assert response.status_code == 200
+    db_session.refresh(order)
+    assert order.status == OrderStatus.OUT_FOR_DELIVERY
+    assert order.courier_name == "Shiprocket Express"
+    assert order.tracking_url == "https://tracking.example.com/fwd"
+    assert order.current_location == "Surat Hub"
+
+
+def test_shiprocket_webhook_updates_return_request_status(client: TestClient, db_session: Session):
+    user = _create_user(db_session, "shiprocket-return@example.com", "9876543411")
+    variant = _create_variant(db_session, "shiprocket-return")
+    order = _create_delivered_order(db_session, user.id, variant, "SHIPROCKETRET")
+
+    return_request = ReturnRequest(
+        order_id=order.id,
+        order_item_id=order.items[0].id,
+        user_id=user.id,
+        reason="other",
+        description="Return requested",
+        refund_amount=999.0,
+        refund_method="original_payment",
+        shiprocket_return_order_id="RET-SHIPROCKETRET",
+        shiprocket_return_shipment_id="return-ship-123",
+        status=ReturnStatus.REQUESTED,
+    )
+    db_session.add(return_request)
+    db_session.commit()
+
+    secret = settings.SHIPROCKET_WEBHOOK_SECRET
+    settings.SHIPROCKET_WEBHOOK_SECRET = "shiprocket-test-secret"
+
+    payload = {
+        "shipment_id": "return-ship-123",
+        "status": "picked_up",
+        "courier_name": "Shiprocket Reverse",
+        "tracking_url": "https://tracking.example.com/ret",
+        "awb_code": "ret-awb-123",
+    }
+    raw_body = json.dumps(payload).encode()
+    signature = hmac.new(
+        settings.SHIPROCKET_WEBHOOK_SECRET.encode(),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    response = client.post(
+        "/api/v1/shiprocket/webhook",
+        headers={
+            "X-Shiprocket-Signature": signature,
+            "Content-Type": "application/json",
+        },
+        content=raw_body,
+    )
+
+    settings.SHIPROCKET_WEBHOOK_SECRET = secret
+
+    assert response.status_code == 200
+    db_session.refresh(return_request)
+    assert return_request.status == ReturnStatus.PICKED_UP
+    assert return_request.return_courier_name == "Shiprocket Reverse"
+    assert return_request.return_tracking_url == "https://tracking.example.com/ret"
+    assert return_request.return_awb_code == "ret-awb-123"
+
+
+def test_fulfill_order_checks_shiprocket_serviceability(monkeypatch, db_session: Session):
+    user = _create_user(db_session, "shiprocket-serviceability@example.com", "9876543412")
+    variant = _create_variant(db_session, "shiprocket-serviceability")
+    order = _create_delivered_order(db_session, user.id, variant, "SERVICEABLE")
+    order.status = OrderStatus.CONFIRMED
+    order.shipment_id = None
+    order.awb_code = None
+
+    payment = Payment(
+        order_id=order.id,
+        payment_method=PaymentMethod.RAZORPAY,
+        payment_status=PaymentStatus.SUCCESS,
+        amount=order.total_amount,
+        currency="INR",
+    )
+    db_session.add(payment)
+    db_session.commit()
+    db_session.refresh(order)
+
+    original_email = settings.SHIPROCKET_EMAIL
+    original_password = settings.SHIPROCKET_PASSWORD
+    original_pickup_postcode = settings.SHIPROCKET_PICKUP_POSTCODE
+    settings.SHIPROCKET_EMAIL = "ops@example.com"
+    settings.SHIPROCKET_PASSWORD = "secret"
+    settings.SHIPROCKET_PICKUP_POSTCODE = "395007"
+
+    called = {"serviceability": False}
+
+    def fake_check(pincode: str, *, cod: bool = False):
+        called["serviceability"] = True
+        assert pincode == order.shipping_address.pincode
+        assert cod is False
+        return {"serviceable": True, "skipped": False}
+
+    monkeypatch.setattr(shiprocket, "check_pincode_serviceability", fake_check)
+    monkeypatch.setattr(
+        shiprocket,
+        "create_forward_shipment",
+        lambda _: shiprocket.ShiprocketShipmentResult(
+            shiprocket_order_id="sr-order-1",
+            shipment_id="shipment-1",
+            awb_code="awb-1",
+            courier_name="Shiprocket Express",
+            tracking_url="https://tracking.example.com",
+            expected_delivery=None,
+            current_status="SHIPPED",
+            current_location="Warehouse",
+            raw_response={},
+        ),
+    )
+    monkeypatch.setattr(
+        shiprocket,
+        "assign_awb",
+        lambda _: shiprocket.ShiprocketShipmentResult(
+            shiprocket_order_id="sr-order-1",
+            shipment_id="shipment-1",
+            awb_code="awb-1",
+            courier_name="Shiprocket Express",
+            tracking_url="https://tracking.example.com",
+            expected_delivery=None,
+            current_status="SHIPPED",
+            current_location="Warehouse",
+            raw_response={},
+        ),
+    )
+    monkeypatch.setattr(shiprocket, "generate_pickup", lambda _: {"pickup_status": "generated"})
+    monkeypatch.setattr(shiprocket, "sync_order_tracking", lambda _: None)
+
+    result = shiprocket.fulfill_order(order)
+
+    settings.SHIPROCKET_EMAIL = original_email
+    settings.SHIPROCKET_PASSWORD = original_password
+    settings.SHIPROCKET_PICKUP_POSTCODE = original_pickup_postcode
+
+    assert called["serviceability"] is True
+    assert result["fulfilled"] is True

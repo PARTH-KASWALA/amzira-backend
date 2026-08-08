@@ -1,5 +1,11 @@
+import csv
 import logging
+import zipfile
+from io import BytesIO, StringIO
+from xml.etree import ElementTree as ET
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Body, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel, EmailStr
@@ -19,6 +25,22 @@ from app.utils.response import success
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+BULK_UPLOAD_HEADERS = [
+    "name",
+    "category_id",
+    "subcategory_id",
+    "base_price",
+    "sale_price",
+    "description",
+    "fabric",
+    "is_featured",
+    "sizes",
+    "colors",
+    "stock",
+    "additional_price",
+    "image_urls",
+    "occasion_slugs",
+]
 
 
 class AdminTestEmailRequest(BaseModel):
@@ -48,6 +70,143 @@ def _normalize_slug(value: str) -> str:
     if not normalized:
         raise HTTPException(status_code=400, detail="Slug cannot be empty")
     return normalized
+
+
+def _parse_bool(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _parse_csv_list(value: str | None) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _parse_optional_float(value: str | None) -> float | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return float(raw)
+
+
+def _parse_optional_int(value: str | None, default: int = 0) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    return int(raw)
+
+
+def _build_unique_product_slug(db: Session, name: str) -> str:
+    base_slug = _normalize_slug(name)
+    slug = base_slug
+    suffix = 2
+    while db.query(Product.id).filter(Product.slug == slug).first():
+        slug = f"{base_slug}-{suffix}"
+        suffix += 1
+    return slug
+
+
+def _extract_xlsx_rows(content: bytes) -> list[dict[str, str]]:
+    namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    with zipfile.ZipFile(BytesIO(content)) as workbook:
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in workbook.namelist():
+            shared_root = ET.fromstring(workbook.read("xl/sharedStrings.xml"))
+            for node in shared_root.findall("main:si", namespace):
+                parts = [segment.text or "" for segment in node.findall(".//main:t", namespace)]
+                shared_strings.append("".join(parts))
+
+        sheet_name = "xl/worksheets/sheet1.xml"
+        if sheet_name not in workbook.namelist():
+            raise HTTPException(status_code=400, detail="XLSX upload must include sheet1.xml")
+
+        sheet_root = ET.fromstring(workbook.read(sheet_name))
+        rows: list[list[str]] = []
+        for row in sheet_root.findall(".//main:sheetData/main:row", namespace):
+            values: list[str] = []
+            for cell in row.findall("main:c", namespace):
+                cell_type = cell.attrib.get("t")
+                value_node = cell.find("main:v", namespace)
+                inline_node = cell.find("main:is/main:t", namespace)
+                value = ""
+                if inline_node is not None and inline_node.text is not None:
+                    value = inline_node.text
+                elif value_node is not None and value_node.text is not None:
+                    value = value_node.text
+                    if cell_type == "s":
+                        value = shared_strings[int(value)] if value.isdigit() and int(value) < len(shared_strings) else ""
+                values.append(value)
+            rows.append(values)
+
+    if not rows:
+        return []
+
+    headers = [str(value or "").strip() for value in rows[0]]
+    parsed_rows: list[dict[str, str]] = []
+    for values in rows[1:]:
+        if not any(str(value or "").strip() for value in values):
+            continue
+        parsed_rows.append(
+            {
+                headers[index]: str(values[index]).strip() if index < len(values) else ""
+                for index in range(len(headers))
+                if headers[index]
+            }
+        )
+    return parsed_rows
+
+
+def _extract_bulk_rows(filename: str, content: bytes) -> list[dict[str, str]]:
+    lowered = str(filename or "").lower()
+    if lowered.endswith(".csv"):
+        csv_data = StringIO(content.decode("utf-8-sig"))
+        return list(csv.DictReader(csv_data))
+    if lowered.endswith(".xlsx"):
+        return _extract_xlsx_rows(content)
+    raise HTTPException(status_code=400, detail="Bulk upload supports .csv and .xlsx files only")
+
+
+def _attach_occasions_to_product(db: Session, product: Product, raw_value: str | None) -> None:
+    occasion_slugs = _parse_csv_list(raw_value)
+    if not occasion_slugs:
+        return
+    occasions = db.query(Occasion).filter(Occasion.slug.in_(occasion_slugs)).all()
+    found = {occasion.slug for occasion in occasions}
+    missing = [slug for slug in occasion_slugs if slug not in found]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Invalid occasion_slugs: {', '.join(missing)}")
+    product.occasions = occasions
+
+
+def _create_bulk_variants(
+    db: Session,
+    *,
+    product: Product,
+    slug: str,
+    sizes: list[str],
+    colors: list[str],
+    stock_quantity: int,
+    additional_price: float,
+) -> int:
+    normalized_sizes = sizes or ["Free"]
+    normalized_colors = colors or [""]
+    created_count = 0
+    for size in normalized_sizes:
+        for color in normalized_colors:
+            sku_parts = [slug, size]
+            if color:
+                sku_parts.append(color)
+            db.add(
+                ProductVariant(
+                    product_id=product.id,
+                    size=size,
+                    color=color or None,
+                    sku="-".join(sku_parts).upper().replace(" ", "-"),
+                    stock_quantity=stock_quantity,
+                    additional_price=additional_price,
+                    is_active=True,
+                )
+            )
+            created_count += 1
+    return created_count
 
 
 def _require_existing_category(db: Session, category_id: int) -> Category:
@@ -224,6 +383,8 @@ def create_product(
         raise HTTPException(status_code=400, detail="Provide image_urls or images")
     
     db.commit()
+    if created:
+        invalidate_product_cache()
     db.refresh(product)
     invalidate_product_cache(slugs=[product.slug])
     
@@ -957,6 +1118,92 @@ def get_analytics(
 
 
 
+@router.get("/inventory/overview")
+@limiter.limit("60/minute")
+def get_inventory_overview(
+    request: Request,
+    low_stock_threshold: int = Query(5, ge=0, le=100),
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    _ = request
+    total_products = db.query(Product).count()
+    active_products = db.query(Product).filter(Product.is_active == True).count()
+    total_variants = db.query(ProductVariant).count()
+    out_of_stock_variants = db.query(ProductVariant).filter(ProductVariant.stock_quantity <= 0).count()
+    low_stock_variants = (
+        db.query(ProductVariant)
+        .filter(ProductVariant.stock_quantity > 0, ProductVariant.stock_quantity <= low_stock_threshold)
+        .count()
+    )
+    low_stock_products = (
+        db.query(
+            Product.id,
+            Product.name,
+            Product.slug,
+            func.sum(ProductVariant.stock_quantity).label("total_stock"),
+        )
+        .join(ProductVariant, ProductVariant.product_id == Product.id)
+        .group_by(Product.id)
+        .having(func.sum(ProductVariant.stock_quantity) > 0)
+        .having(func.sum(ProductVariant.stock_quantity) <= low_stock_threshold)
+        .order_by(func.sum(ProductVariant.stock_quantity).asc(), Product.id.asc())
+        .limit(10)
+        .all()
+    )
+    return success(
+        data={
+            "total_products": total_products,
+            "active_products": active_products,
+            "total_variants": total_variants,
+            "out_of_stock_variants": out_of_stock_variants,
+            "low_stock_variants": low_stock_variants,
+            "low_stock_threshold": low_stock_threshold,
+            "low_stock_products": [
+                {
+                    "product_id": product_id,
+                    "name": name,
+                    "slug": slug,
+                    "total_stock": int(total_stock or 0),
+                }
+                for product_id, name, slug, total_stock in low_stock_products
+            ],
+        },
+        message="Inventory overview retrieved successfully",
+    )
+
+
+@router.get("/products/bulk-upload/template")
+@limiter.limit("20/minute")
+def download_bulk_upload_template(
+    request: Request,
+    current_admin: User = Depends(require_admin),
+):
+    _ = request
+    return success(
+        data={
+            "headers": BULK_UPLOAD_HEADERS,
+            "sample_row": {
+                "name": "Ivory Sherwani",
+                "category_id": "1",
+                "subcategory_id": "",
+                "base_price": "6999",
+                "sale_price": "6499",
+                "description": "Festive sherwani with woven detailing",
+                "fabric": "Silk Blend",
+                "is_featured": "true",
+                "sizes": "M,L,XL",
+                "colors": "Ivory,Gold",
+                "stock": "8",
+                "additional_price": "0",
+                "image_urls": "https://cdn.amzira.test/ivory-front.jpg,https://cdn.amzira.test/ivory-back.jpg",
+                "occasion_slugs": "wedding,reception",
+            },
+        },
+        message="Bulk upload template retrieved successfully",
+    )
+
+
 # app/api/v1/admin.py
 
 @router.post("/products/bulk-upload")
@@ -967,20 +1214,16 @@ async def bulk_upload_products(
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Admin: Bulk upload products from CSV"""
-    import csv
-    from io import StringIO
-    
+    """Admin: Bulk upload products from CSV or XLSX."""
     content = await file.read()
-    csv_data = StringIO(content.decode('utf-8'))
-    reader = csv.DictReader(csv_data)
-    
+    rows = _extract_bulk_rows(file.filename or "", content)
+
     created = []
     errors = []
     category_exists_cache = {}
-    
-    for row in reader:
-        row_number = reader.line_num
+    created_variants = 0
+
+    for row_number, row in enumerate(rows, start=2):
         try:
             # Validate required fields
             required = ['name', 'category_id', 'base_price']
@@ -1003,34 +1246,59 @@ async def bulk_upload_products(
                 errors.append(f"Row {row_number}: Invalid category_id {category_id}")
                 continue
 
-            resolved_category_id, _ = _resolve_product_category(db, category_id)
+            subcategory_id = _parse_optional_int(row.get("subcategory_id"), default=0) or None
+            resolved_category_id, resolved_subcategory_id = _resolve_product_category(
+                db,
+                category_id,
+                subcategory_id,
+            )
 
             with db.begin_nested():
-                slug = slugify(row['name'])
+                slug = _build_unique_product_slug(db, row['name'])
+                sale_price = _parse_optional_float(row.get('sale_price'))
+                base_price = float(row['base_price'])
+                discount = 0
+                if sale_price is not None and sale_price < base_price:
+                    discount = int(((base_price - sale_price) / base_price) * 100)
                 product = Product(
                     name=row['name'],
                     slug=slug,
                     category_id=resolved_category_id,
-                    base_price=float(row['base_price']),
-                    sale_price=float(row['sale_price']) if row.get('sale_price') else None,
+                    subcategory_id=resolved_subcategory_id,
+                    base_price=base_price,
+                    sale_price=sale_price,
+                    discount_percentage=discount,
                     description=row.get('description'),
                     fabric=row.get('fabric'),
-                    is_featured=row.get('is_featured', '').lower() == 'true'
+                    is_featured=_parse_bool(row.get('is_featured')),
+                    is_active=True,
                 )
                 db.add(product)
                 db.flush()
 
-                # Add variants if provided
-                if row.get('sizes'):
-                    sizes = row['sizes'].split(',')
-                    for size in sizes:
-                        variant = ProductVariant(
+                _attach_occasions_to_product(db, product, row.get("occasion_slugs"))
+
+                image_urls = _parse_csv_list(row.get("image_urls"))
+                for image_index, image_url in enumerate(image_urls):
+                    db.add(
+                        ProductImage(
                             product_id=product.id,
-                            size=size.strip(),
-                            sku=f"{slug}-{size.strip()}".upper(),
-                            stock_quantity=int(row.get('stock', 0))
+                            image_url=image_url,
+                            alt_text=product.name,
+                            display_order=image_index,
+                            is_primary=(image_index == 0),
                         )
-                        db.add(variant)
+                    )
+
+                created_variants += _create_bulk_variants(
+                    db,
+                    product=product,
+                    slug=slug,
+                    sizes=_parse_csv_list(row.get("sizes")),
+                    colors=_parse_csv_list(row.get("colors")),
+                    stock_quantity=_parse_optional_int(row.get("stock"), default=0),
+                    additional_price=_parse_optional_float(row.get("additional_price")) or 0.0,
+                )
 
             created.append(product.name)
         except Exception as e:
@@ -1041,9 +1309,11 @@ async def bulk_upload_products(
     return success(
         data={
             "created_count": len(created),
+            "created_variant_count": created_variants,
             "error_count": len(errors),
             "created": created[:10],
             "errors": errors[:10],
+            "rows_processed": len(rows),
         },
         message="Bulk upload completed",
     )

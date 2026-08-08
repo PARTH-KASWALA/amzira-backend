@@ -155,39 +155,28 @@ def test_concurrent_stock_purchase_prevents_oversell(client: TestClient, db_sess
     db_session.commit()
 
     _login(client, user_one.email)
-    valid_signature_1 = hmac.new(
-        settings.RAZORPAY_KEY_SECRET.encode(),
-        b"razorpay_order_race_1|payment_race_1",
-        hashlib.sha256,
-    ).hexdigest()
     success_response = client.post(
         "/api/v1/payments/verify",
         headers=_csrf_headers(client),
         json={
             "razorpay_order_id": "razorpay_order_race_1",
             "razorpay_payment_id": "payment_race_1",
-            "razorpay_signature": valid_signature_1,
+            "razorpay_signature": "legacy-endpoint-signature",
         },
     )
-    assert success_response.status_code == 200
+    assert success_response.status_code == 410
 
     _login(client, user_two.email)
-    valid_signature_2 = hmac.new(
-        settings.RAZORPAY_KEY_SECRET.encode(),
-        b"razorpay_order_race_2|payment_race_2",
-        hashlib.sha256,
-    ).hexdigest()
     failed_response = client.post(
         "/api/v1/payments/verify",
         headers=_csrf_headers(client),
         json={
             "razorpay_order_id": "razorpay_order_race_2",
             "razorpay_payment_id": "payment_race_2",
-            "razorpay_signature": valid_signature_2,
+            "razorpay_signature": "legacy-endpoint-signature",
         },
     )
-    assert failed_response.status_code == 400
-    assert "Insufficient stock" in failed_response.json()["message"]
+    assert failed_response.status_code == 410
 
 
 def test_payment_abandonment_cleanup_restores_stock(db_session: Session):
@@ -221,22 +210,16 @@ def test_double_payment_prevention(client: TestClient, db_session: Session):
     db_session.commit()
 
     _login(client, user.email)
-    signature = hmac.new(
-        settings.RAZORPAY_KEY_SECRET.encode(),
-        b"razorpay_double_order|payment_double_1",
-        hashlib.sha256,
-    ).hexdigest()
-
     first = client.post(
         "/api/v1/payments/verify",
         headers=_csrf_headers(client),
         json={
             "razorpay_order_id": "razorpay_double_order",
             "razorpay_payment_id": "payment_double_1",
-            "razorpay_signature": signature,
+            "razorpay_signature": "legacy-endpoint-signature",
         },
     )
-    assert first.status_code == 200
+    assert first.status_code == 410
 
     second = client.post(
         "/api/v1/payments/verify",
@@ -244,10 +227,10 @@ def test_double_payment_prevention(client: TestClient, db_session: Session):
         json={
             "razorpay_order_id": "razorpay_double_order",
             "razorpay_payment_id": "payment_double_1",
-            "razorpay_signature": signature,
+            "razorpay_signature": "legacy-endpoint-signature",
         },
     )
-    assert second.status_code == 409
+    assert second.status_code == 410
 
 
 def test_cancel_pending_order_restores_stock(client: TestClient, db_session: Session):
@@ -370,8 +353,21 @@ def test_razorpay_signature_tampering_rejection(client: TestClient, db_session: 
             "razorpay_signature": "invalid_signature",
         },
     )
-    assert response.status_code == 400
-    assert response.json()["message"] == "Invalid payment signature"
+    assert response.status_code == 410
+
+
+def test_legacy_payment_create_order_endpoint_is_gone(client: TestClient, db_session: Session):
+    user = _create_user(db_session, "legacycreate@example.com", "9876543210")
+    variant = _create_variant(db_session, stock=2, suffix="legacycreate")
+    order = _create_pending_order(db_session, user.id, variant, stock_deducted=False, quantity=1)
+
+    _login(client, user.email)
+    response = client.post(
+        "/api/v1/payments/create-order",
+        headers=_csrf_headers(client),
+        json={"order_id": order.id},
+    )
+    assert response.status_code == 410
 
 
 def test_webhook_retry_does_not_double_deduct_reserved_stock(client: TestClient, db_session: Session):

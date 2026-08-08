@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from typing import Optional
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -15,7 +15,7 @@ from app.schemas.order import OrderCreate
 from app.core.exceptions import OrderNotFound
 import random
 import string
-from app.models.product import ProductVariant
+from app.models.product import Product, ProductVariant
 from app.services.order_tracking_service import OrderTrackingService
 from app.schemas.order_tracking import OrderStatusUpdate, OrderTrackingResponse
 from app.services.shiprocket import create_return_shipment, sync_order_tracking
@@ -36,6 +36,21 @@ import logging
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _order_loader_options():
+    return (
+        selectinload(Order.items)
+        .joinedload(OrderItem.product)
+        .selectinload(Product.images),
+        selectinload(Order.items).joinedload(OrderItem.variant),
+        joinedload(Order.payment),
+        joinedload(Order.shipping_address),
+    )
+
+
+def _order_query(db: Session):
+    return db.query(Order).options(*_order_loader_options())
 
 
 def _to_decimal(value) -> Decimal:
@@ -137,13 +152,16 @@ def _serialize_order(order: Order) -> dict:
         "tracking_number": tracking_number,
         "shiprocket_order_id": order.shiprocket_order_id,
         "shipment_id": order.shipment_id,
+        "tracking_id": order.tracking_id,
         "awb_code": order.awb_code,
         "tracking_url": order.tracking_url,
         "courier_name": order.courier_name or order.carrier_name,
         "carrier_name": order.carrier_name,
         "current_location": order.current_location,
         "shiprocket_last_status": order.shiprocket_last_status,
+        "courier_status": order.courier_status,
         "pickup_scheduled_at": order.pickup_scheduled_at,
+        "delivery_date": order.delivery_date,
         "customer_notes": order.customer_notes,
         "delivered_at": order.delivered_at,
         "return_deadline": order.return_deadline,
@@ -214,15 +232,28 @@ def _resolve_order_reference(
     current_user: Optional[User] = None,
     allow_public_numeric: bool = False,
 ) -> Order | None:
-    order = db.query(Order).filter(Order.order_number == order_reference).first()
-    if order:
-        return order
+    query = _order_query(db)
+    if current_user and current_user.role.value == "admin":
+        order = query.filter(Order.order_number == order_reference).first()
+        if order:
+            return order
+    elif current_user:
+        order = query.filter(
+            Order.order_number == order_reference,
+            Order.user_id == current_user.id,
+        ).first()
+        if order:
+            return order
+    elif allow_public_numeric:
+        order = query.filter(Order.order_number == order_reference).first()
+        if order:
+            return order
 
     if not order_reference.isdigit():
         return None
 
     numeric_id = int(order_reference)
-    query = db.query(Order).filter(Order.id == numeric_id)
+    query = query.filter(Order.id == numeric_id)
     if allow_public_numeric:
         return query.first()
     if current_user and current_user.role.value == "admin":
@@ -234,253 +265,9 @@ def _resolve_order_reference(
 
 def _can_access_order(order: Order, current_user: Optional[User]) -> bool:
     if current_user is None:
-        return True
+        return False
     return current_user.role.value == "admin" or order.user_id == current_user.id
 
-
-def generate_order_number(db: Session) -> str:
-    """Generate a unique order number with bounded retries."""
-    max_attempts = 10
-
-    for _ in range(max_attempts):
-        timestamp = datetime.now().strftime("%Y%m%d")
-        random_part = "".join(
-            random.choices(string.ascii_uppercase + string.digits, k=8)
-        )
-        order_number = f"AMZ{timestamp}{random_part}"
-
-        existing = db.query(Order).filter(Order.order_number == order_number).first()
-        if not existing:
-            return order_number
-
-    raise ValueError("Failed to generate unique order number")
-
-
-@router.post(
-    "/",
-    response_model=dict,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create new order",
-    description="""
-Creates an order from the authenticated user's cart.
-
-Process:
-1. Validates cart is not empty
-2. Verifies shipping and billing addresses belong to user
-3. Locks variants to prevent overselling
-4. Calculates subtotal, tax, and shipping
-5. Creates order and order items
-6. Reserves stock and clears cart
-7. For COD, confirms payment immediately
-""",
-    responses={
-        201: {"description": "Order created successfully"},
-        400: {"description": "Cart empty or insufficient stock"},
-        401: {"description": "Authentication required"},
-        404: {"description": "Address not found"},
-        500: {"description": "Failed to generate order number"},
-    },
-    tags=["Orders"],
-)
-@limiter.limit("10/minute")
-def create_order(
-    request: Request,
-    order_data: OrderCreate,
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
-):
-    """Create order from cart"""
-    try:
-        existing_order = (
-            db.query(Order)
-            .filter(
-                Order.user_id == current_user.id,
-                Order.idempotency_key == order_data.idempotency_key,
-            )
-            .first()
-        )
-        if existing_order:
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content=success(
-                    data={
-                        "order_id": existing_order.id,
-                        "order_number": existing_order.order_number,
-                        "total_amount": existing_order.total_amount,
-                        "status": existing_order.status.value,
-                    },
-                    message="Order already exists",
-                ),
-            )
-
-        # Get cart items
-        cart_items = db.query(CartItem).filter(CartItem.user_id == current_user.id).all()
-
-        if not cart_items:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cart is empty"
-            )
-
-        # Verify addresses belong to user
-        shipping_address = db.query(Address).filter(
-            Address.id == order_data.shipping_address_id,
-            Address.user_id == current_user.id
-        ).first()
-
-        billing_address = db.query(Address).filter(
-            Address.id == order_data.billing_address_id,
-            Address.user_id == current_user.id
-        ).first()
-
-        if not shipping_address or not billing_address:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Address not found"
-            )
-
-        # Lock variants in deterministic order only for stock validation at order creation.
-        requested_quantities = {}
-        for cart_item in cart_items:
-            requested_quantities[cart_item.variant_id] = (
-                requested_quantities.get(cart_item.variant_id, 0) + cart_item.quantity
-            )
-
-        locked_variants = {}
-        for variant_id in sorted(requested_quantities.keys()):
-            locked_variant = (
-                db.query(ProductVariant)
-                .filter(ProductVariant.id == variant_id)
-                .with_for_update()
-                .first()
-            )
-            if not locked_variant:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Product variant {variant_id} not found",
-                )
-            locked_variants[variant_id] = locked_variant
-
-        subtotal = Decimal("0.00")
-        order_items_data = []
-
-        for variant_id, requested_qty in requested_quantities.items():
-            variant = locked_variants[variant_id]
-            if variant.stock_quantity < requested_qty:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Insufficient stock for {variant.product.name}"
-                )
-
-        for variant_id, requested_qty in requested_quantities.items():
-            locked_variants[variant_id].stock_quantity -= requested_qty
-
-        for cart_item in cart_items:
-            variant = locked_variants[cart_item.variant_id]
-            product = cart_item.product
-            base_price = product.sale_price if product.sale_price else product.base_price
-            unit_price = _to_decimal(base_price) + _to_decimal(variant.additional_price)
-            total_price = (unit_price * cart_item.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            subtotal += total_price
-
-            variant_details = f"Size: {variant.size}"
-            if variant.color:
-                variant_details += f", Color: {variant.color}"
-
-            order_items_data.append({
-                "product_id": product.id,
-                "variant_id": variant.id,
-                "product_name": product.name,
-                "variant_details": variant_details,
-                "quantity": cart_item.quantity,
-                "unit_price": unit_price,
-                "total_price": total_price
-            })
-
-        tax_amount = calculate_tax(subtotal)
-        shipping_charge = calculate_shipping(subtotal)
-        total_amount = subtotal + tax_amount + shipping_charge
-
-        try:
-            order_number = generate_order_number(db)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to generate order number",
-            ) from exc
-
-        order = Order(
-            order_number=order_number,
-            user_id=current_user.id,
-            subtotal=subtotal,
-            tax_amount=tax_amount,
-            shipping_charge=shipping_charge,
-            total_amount=total_amount,
-            status=OrderStatus.PLACED,
-            expires_at=datetime.utcnow() + timedelta(minutes=30),
-            shipping_address_id=order_data.shipping_address_id,
-            billing_address_id=order_data.billing_address_id,
-            customer_notes=order_data.customer_notes,
-            stock_deducted=True,
-            idempotency_key=order_data.idempotency_key,
-            return_status="not_applicable",
-        )
-
-        db.add(order)
-        db.flush()
-
-        for item_data in order_items_data:
-            db.add(OrderItem(order_id=order.id, **item_data))
-
-        product_slugs = {item.product.slug for item in cart_items if item.product and item.product.slug}
-        db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
-        db.commit()
-        db.refresh(order)
-        invalidate_product_cache(slugs=product_slugs)
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception:
-        db.rollback()
-        raise
-    
-    # Format response
-    items_response = [
-        {
-            "id": item.id,
-            "product_name": item.product_name,
-            "variant_details": item.variant_details,
-            "quantity": item.quantity,
-            "unit_price": item.unit_price,
-            "total_price": item.total_price
-        }
-        for item in order.items
-    ]
-    
-    payment_method = (order_data.payment_method or "razorpay").lower()
-    if payment_method == "cod":
-        from app.services.payment_service import create_cod_payment
-
-        create_cod_payment(order, db)
-
-        return success(
-            message="Order placed successfully. Pay on delivery.",
-            data={
-                "order_number": order.order_number,
-                "payment_method": "cod",
-                "expires_at": _isoformat_or_none(order.expires_at),
-            },
-        )
-
-    return success(
-    message="Order created successfully",
-    data={
-        "order_id": order.id,
-        "order_number": order.order_number,
-        "status": order.status,
-        "expires_at": _isoformat_or_none(order.expires_at),
-    }
-)
 
 @router.get("/", response_model=dict)
 @limiter.limit("30/minute")
@@ -495,7 +282,7 @@ def get_user_orders(
     try:
         logger.info("orders_fetch_started user_id=%s page=%s limit=%s", current_user.id, page, limit)
 
-        base_query = db.query(Order).filter(Order.user_id == current_user.id)
+        base_query = _order_query(db).filter(Order.user_id == current_user.id)
         total = base_query.count()
 
         orders = (
@@ -564,7 +351,7 @@ def get_user_orders_by_id(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
 
     orders = (
-        db.query(Order)
+        _order_query(db)
         .filter(Order.user_id == user_id)
         .order_by(Order.created_at.desc())
         .all()
@@ -618,7 +405,7 @@ def cancel_order(
     db: Session = Depends(get_db)
 ):
     """Cancel order"""
-    order = db.query(Order).filter(
+    order = _order_query(db).filter(
         Order.id == order_id,
         Order.user_id == current_user.id
     ).first()
@@ -678,7 +465,7 @@ def mark_delivered(
     current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    order = db.query(Order).filter(Order.id == order_id).first()
+    order = _order_query(db).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
 
@@ -707,7 +494,7 @@ def request_order_return(
     db: Session = Depends(get_db),
 ):
     order = (
-        db.query(Order)
+        _order_query(db)
         .filter(Order.id == order_id, Order.user_id == current_user.id)
         .with_for_update()
         .first()
@@ -805,7 +592,7 @@ def get_return_eligibility(
     db: Session = Depends(get_db),
 ):
     order = (
-        db.query(Order)
+        _order_query(db)
         .filter(Order.id == order_id, Order.user_id == current_user.id)
         .first()
     )
@@ -887,7 +674,7 @@ def download_invoice(
     db: Session = Depends(get_db),
 ):
     order = (
-        db.query(Order)
+        _order_query(db)
         .filter(
             Order.order_number == order_number,
             Order.user_id == current_user.id,

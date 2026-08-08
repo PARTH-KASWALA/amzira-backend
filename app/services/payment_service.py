@@ -13,7 +13,7 @@ from app.core.config import settings
 from app.models.order import Order, OrderStatus
 from app.models.product import ProductVariant
 from app.models.payment import Payment, PaymentMethod, PaymentStatus
-from app.services.shiprocket import fulfill_order
+from app.tasks.order_tasks import dispatch_fulfill_order
 from app.tasks.email_tasks import send_order_confirmation
 
 logger = logging.getLogger(__name__)
@@ -214,14 +214,11 @@ def _queue_order_confirmation(order_id: int) -> None:
 
 
 def _try_shiprocket_fulfillment(order: Order, db: Session) -> None:
+    _ = db
     try:
-        result = fulfill_order(order)
-        if result.get("shipment_id") or result.get("shiprocket_order_id") or result.get("awb_code"):
-            db.commit()
-            db.refresh(order)
+        dispatch_fulfill_order(order.id)
     except Exception:
-        db.rollback()
-        logger.exception("shiprocket_fulfillment_failed order_id=%s", order.id)
+        logger.exception("shiprocket_fulfillment_queue_failed order_id=%s", order.id)
 
 
 def _lock_variants_for_order(db: Session, order: Order) -> dict[int, ProductVariant]:

@@ -18,6 +18,8 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
+    task_store_eager_result=settings.CELERY_TASK_STORE_EAGER_RESULT,
 
     task_track_started=True,
 
@@ -46,6 +48,10 @@ celery_app.conf.beat_schedule = {
     "cancel-expired-orders-every-5-min": {
         "task": "app.tasks.order_tasks.cleanup_expired_orders",
         "schedule": crontab(minute="*/5"),
+    },
+    "purge-expired-checkout-intents-hourly": {
+        "task": "app.tasks.order_tasks.purge_expired_payment_intents",
+        "schedule": crontab(minute=0),
     },
     "cleanup-expired-blacklisted-tokens-daily": {
         "task": "app.tasks.security_tasks.cleanup_expired_blacklisted_tokens",

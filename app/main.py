@@ -16,7 +16,7 @@ from slowapi.middleware import SlowAPIMiddleware
 import time
 import structlog
 import uuid
-from sqlalchemy import func, inspect, text
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.logging import configure_logging
@@ -25,9 +25,7 @@ from app.core.celery_app import celery_app
 from app.core.exceptions import APIError
 from app.core.rate_limiter import limiter
 from app.db.session import SessionLocal, engine, get_db
-from app.db.base_class import Base
 from app.models.category import Category
-from app.models.checkout_payment_intent import CheckoutPaymentIntent
 from app.models.product import Product, Occasion, product_occasions
 from app.models.user import User, UserRole
 from app.api.v1 import auth, products, cart, orders, users, payments, admin, reviews, wishlist, coupons, returns, stock, categories, commerce_checkout, webhooks
@@ -123,156 +121,6 @@ def validate_production_admin_bootstrap():
         )
 
 
-@app.on_event("startup")
-def ensure_checkout_payment_intent_table():
-    """
-    Create the payment-intent table if it is missing.
-    This keeps checkout working in environments where migrations
-    have not yet been applied for the new payment-first flow.
-    """
-    Base.metadata.create_all(bind=engine, tables=[CheckoutPaymentIntent.__table__])
-
-
-@app.on_event("startup")
-def ensure_orders_return_columns():
-    """
-    Keep legacy local databases compatible with the current Order model.
-    This avoids hard 500s on environments where the return-window migration
-    has not been applied yet.
-    """
-    inspector = inspect(engine)
-    if "orders" not in inspector.get_table_names():
-        return
-
-    existing_columns = {column["name"] for column in inspector.get_columns("orders")}
-    statements = []
-
-    if "delivered_at" not in existing_columns:
-        statements.append(
-            "ALTER TABLE orders ADD COLUMN delivered_at TIMESTAMP WITH TIME ZONE"
-        )
-    if "return_deadline" not in existing_columns:
-        statements.append(
-            "ALTER TABLE orders ADD COLUMN return_deadline TIMESTAMP WITH TIME ZONE"
-        )
-    if "return_status" not in existing_columns:
-        statements.append(
-            "ALTER TABLE orders ADD COLUMN return_status VARCHAR(20) DEFAULT 'not_applicable' NOT NULL"
-        )
-    if "courier_name" not in existing_columns:
-        statements.append("ALTER TABLE orders ADD COLUMN courier_name VARCHAR(100)")
-    if "shiprocket_order_id" not in existing_columns:
-        statements.append("ALTER TABLE orders ADD COLUMN shiprocket_order_id VARCHAR(100)")
-    if "shipment_id" not in existing_columns:
-        statements.append("ALTER TABLE orders ADD COLUMN shipment_id VARCHAR(100)")
-    if "awb_code" not in existing_columns:
-        statements.append("ALTER TABLE orders ADD COLUMN awb_code VARCHAR(100)")
-    if "tracking_url" not in existing_columns:
-        statements.append("ALTER TABLE orders ADD COLUMN tracking_url VARCHAR(500)")
-    if "current_location" not in existing_columns:
-        statements.append("ALTER TABLE orders ADD COLUMN current_location VARCHAR(255)")
-    if "shiprocket_last_status" not in existing_columns:
-        statements.append("ALTER TABLE orders ADD COLUMN shiprocket_last_status VARCHAR(100)")
-    if "pickup_scheduled_at" not in existing_columns:
-        statements.append("ALTER TABLE orders ADD COLUMN pickup_scheduled_at TIMESTAMP")
-
-    if not statements:
-        statements = []
-
-    with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
-
-    if "return_requests" not in inspector.get_table_names():
-        return
-
-    return_columns = {column["name"] for column in inspector.get_columns("return_requests")}
-    return_statements = []
-    if "shiprocket_return_order_id" not in return_columns:
-        return_statements.append("ALTER TABLE return_requests ADD COLUMN shiprocket_return_order_id VARCHAR(100)")
-    if "shiprocket_return_shipment_id" not in return_columns:
-        return_statements.append("ALTER TABLE return_requests ADD COLUMN shiprocket_return_shipment_id VARCHAR(100)")
-    if "return_awb_code" not in return_columns:
-        return_statements.append("ALTER TABLE return_requests ADD COLUMN return_awb_code VARCHAR(100)")
-    if "return_tracking_url" not in return_columns:
-        return_statements.append("ALTER TABLE return_requests ADD COLUMN return_tracking_url VARCHAR(500)")
-    if "return_courier_name" not in return_columns:
-        return_statements.append("ALTER TABLE return_requests ADD COLUMN return_courier_name VARCHAR(100)")
-
-    if return_statements:
-        with engine.begin() as connection:
-            for statement in return_statements:
-                connection.execute(text(statement))
-
-
-@app.on_event("startup")
-def normalize_legacy_order_statuses():
-    """
-    Keep the PostgreSQL orderstatus enum aligned with the current application model
-    and normalize legacy `PENDING` rows to `PLACED`.
-    """
-    try:
-        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-            connection.execute(
-                text(
-                    """
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1
-                            FROM pg_type t
-                            JOIN pg_enum e ON t.oid = e.enumtypid
-                            WHERE t.typname = 'orderstatus' AND e.enumlabel = 'PLACED'
-                        ) THEN
-                            ALTER TYPE orderstatus ADD VALUE 'PLACED';
-                        END IF;
-
-                        IF NOT EXISTS (
-                            SELECT 1
-                            FROM pg_type t
-                            JOIN pg_enum e ON t.oid = e.enumtypid
-                            WHERE t.typname = 'orderstatus' AND e.enumlabel = 'OUT_FOR_DELIVERY'
-                        ) THEN
-                            ALTER TYPE orderstatus ADD VALUE 'OUT_FOR_DELIVERY';
-                        END IF;
-
-                        IF NOT EXISTS (
-                            SELECT 1
-                            FROM pg_type t
-                            JOIN pg_enum e ON t.oid = e.enumtypid
-                            WHERE t.typname = 'orderstatus' AND e.enumlabel = 'RETURN_REQUESTED'
-                        ) THEN
-                            ALTER TYPE orderstatus ADD VALUE 'RETURN_REQUESTED';
-                        END IF;
-
-                        IF NOT EXISTS (
-                            SELECT 1
-                            FROM pg_type t
-                            JOIN pg_enum e ON t.oid = e.enumtypid
-                            WHERE t.typname = 'orderstatus' AND e.enumlabel = 'RETURNED'
-                        ) THEN
-                            ALTER TYPE orderstatus ADD VALUE 'RETURNED';
-                        END IF;
-
-                    END $$;
-                    """
-                )
-            )
-        with engine.begin() as connection:
-            connection.execute(
-                text(
-                    """
-                    UPDATE orders
-                    SET status = 'PLACED'::orderstatus
-                    WHERE status = 'PENDING'::orderstatus
-                    """
-                )
-            )
-    except Exception:
-        # Startup should not fail on enum normalization; the compatibility model
-        # still accepts legacy rows if this update cannot run.
-        pass
-
 # --------------------------------------------------
 # RATE LIMITING SETUP
 # --------------------------------------------------
@@ -337,6 +185,13 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    # Allow storefront pages on a different dev origin/port to embed product images.
+    response.headers["Cross-Origin-Resource-Policy"] = (
+        "cross-origin" if request.url.path.startswith("/static/") else "same-origin"
+    )
     if settings.ENVIRONMENT == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -347,8 +202,17 @@ async def add_csp_header(request: Request, call_next):
     response = await call_next(request)
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
+        "base-uri 'self'; "
+        "object-src 'none'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'; "
         "script-src 'self' 'unsafe-inline' https://checkout.razorpay.com; "
-        "style-src 'self' 'unsafe-inline';"
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https:; "
+        "frame-src https://checkout.razorpay.com; "
+        "upgrade-insecure-requests;"
     )
     return response
 
@@ -388,6 +252,21 @@ async def add_request_id(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
+
+
+@app.middleware("http")
+async def protect_health_endpoints(request: Request, call_next):
+    if settings.ENVIRONMENT == "production" and request.url.path.startswith("/health"):
+        provided_token = (
+            request.headers.get("X-Health-Token")
+            or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        )
+        if provided_token != settings.HEALTHCHECK_TOKEN:
+            return standardized_error_response(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                message="Unauthorized health check request",
+            )
+    return await call_next(request)
 
 # --------------------------------------------------
 # REQUEST LOGGING MIDDLEWARE
@@ -675,9 +554,17 @@ CSRF_EXEMPT_PATHS = {
 }
 CSRF_PROTECTED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+
+def _allow_local_csrf_bypass(request: Request) -> bool:
+    if settings.ENVIRONMENT == "production":
+        return False
+
+    hostname = (request.url.hostname or "").lower()
+    return hostname in {"127.0.0.1", "localhost"}
+
 @app.middleware("http")
 async def csrf_middleware(request: Request, call_next):
-    if settings.ENVIRONMENT != "production" and request.url.path.startswith("/api/"):
+    if _allow_local_csrf_bypass(request) and request.url.path.startswith("/api/"):
         return await call_next(request)
     path = request.url.path.rstrip("/") or "/"
     if request.method in CSRF_PROTECTED_METHODS and path not in CSRF_EXEMPT_PATHS:

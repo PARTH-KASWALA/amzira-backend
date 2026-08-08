@@ -124,9 +124,105 @@ def test_delivery_estimate_endpoint_returns_shipping_and_dates(client: TestClien
     assert isinstance(data["estimated_delivery_date_end"], str)
 
 
+def test_health_response_includes_hardened_csp_headers(client: TestClient):
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    csp = response.headers.get("content-security-policy", "")
+    assert "object-src 'none'" in csp
+    assert "base-uri 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+
 def test_delivery_estimate_endpoint_rejects_invalid_pincode(client: TestClient, db_session: Session):
     product = _create_product_with_images(db_session)
     response = client.get(f"/api/v1/products/{product.slug}/delivery-estimate?pincode=123")
 
     assert response.status_code == 400
     assert response.json()["message"] == "Pincode must be 6 digits"
+
+
+def test_product_search_requires_all_terms_to_match(client: TestClient, db_session: Session):
+    category = Category(
+        name="Women",
+        slug="women",
+        is_active=True,
+    )
+    db_session.add(category)
+    db_session.flush()
+
+    matching_product = Product(
+        category_id=category.id,
+        name="Rose Gold Lehenga",
+        slug="rose-gold-lehenga",
+        description="Premium festive lehenga for wedding events",
+        base_price=5000.0,
+        is_active=True,
+    )
+    non_matching_product = Product(
+        category_id=category.id,
+        name="Rose Kurta",
+        slug="rose-kurta",
+        description="Casual kurta set",
+        base_price=2500.0,
+        is_active=True,
+    )
+    db_session.add_all([matching_product, non_matching_product])
+    db_session.commit()
+
+    response = client.get("/api/v1/products?search=rose lehenga")
+
+    assert response.status_code == 200
+    products = response.json()["data"]["products"]
+    assert len(products) == 1
+    assert products[0]["slug"] == "rose-gold-lehenga"
+
+
+def test_product_list_supports_server_side_variant_and_fabric_filters(client: TestClient, db_session: Session):
+    category = Category(
+        name="Women",
+        slug="women",
+        is_active=True,
+    )
+    db_session.add(category)
+    db_session.flush()
+
+    matching_product = Product(
+        category_id=category.id,
+        name="Red Silk Kurti",
+        slug="red-silk-kurti",
+        description="Silk kurti",
+        base_price=3200.0,
+        sale_price=2800.0,
+        fabric="Silk",
+        is_active=True,
+    )
+    other_product = Product(
+        category_id=category.id,
+        name="Blue Cotton Kurti",
+        slug="blue-cotton-kurti",
+        description="Cotton kurti",
+        base_price=2200.0,
+        sale_price=1900.0,
+        fabric="Cotton",
+        is_active=True,
+    )
+    db_session.add_all([matching_product, other_product])
+    db_session.flush()
+
+    db_session.add_all(
+        [
+            ProductImage(product_id=matching_product.id, image_url="/static/red.jpg", alt_text="Red", display_order=0, is_primary=True),
+            ProductImage(product_id=other_product.id, image_url="/static/blue.jpg", alt_text="Blue", display_order=0, is_primary=True),
+            ProductVariant(product_id=matching_product.id, size="M", color="Red", sku="RSK-M-RED", stock_quantity=3, is_active=True),
+            ProductVariant(product_id=other_product.id, size="L", color="Blue", sku="BCK-L-BLUE", stock_quantity=4, is_active=True),
+        ]
+    )
+    db_session.commit()
+
+    response = client.get("/api/v1/products?category=women&fabric=Silk&color=Red&size=M")
+
+    assert response.status_code == 200
+    products = response.json()["data"]["products"]
+    assert len(products) == 1
+    assert products[0]["slug"] == "red-silk-kurti"

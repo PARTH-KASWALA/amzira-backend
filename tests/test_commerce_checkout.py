@@ -175,6 +175,9 @@ def test_payment_verification_creates_order_and_clears_cart(
     cart_payload = _get_cart(client)
     assert len(cart_payload["items"]) == 1
     assert cart_payload["subtotal"] == 2400.0
+    assert cart_payload["shipping_amount"] == 0.0
+    assert cart_payload["tax"] == 120.0
+    assert cart_payload["total"] == 2520.0
 
     address_response = _create_address_via_api(
         client,
@@ -209,10 +212,7 @@ def test_payment_verification_creates_order_and_clears_cart(
         headers=headers,
         json={"user_id": user.id, "address_id": address_id},
     )
-    assert prefixed_checkout_response.status_code == 200
-    prefixed_checkout_payload = prefixed_checkout_response.json()["data"]
-    assert prefixed_checkout_payload["status"] == "validated"
-    assert prefixed_checkout_payload["total"] == 2520.0
+    assert prefixed_checkout_response.status_code == 404
 
     monkeypatch.setattr(
         commerce_checkout,
@@ -478,6 +478,12 @@ def test_structured_cart_update_and_delete_flow(client: TestClient, db_session: 
     add_response = _add_cart_item(client, headers, variant, 1)
     cart_item_id = add_response["data"]["cart_item_id"]
 
+    initial_cart_payload = _get_cart(client)
+    assert initial_cart_payload["subtotal"] == 1200.0
+    assert initial_cart_payload["shipping_amount"] == 100.0
+    assert initial_cart_payload["tax"] == 65.0
+    assert initial_cart_payload["total"] == 1365.0
+
     update_response = client.put(
         f"/api/v1/cart/items/{cart_item_id}",
         headers=headers,
@@ -499,7 +505,77 @@ def test_structured_cart_update_and_delete_flow(client: TestClient, db_session: 
     assert empty_cart["items"] == []
 
 
-def test_direct_order_creation_is_disabled(client: TestClient, db_session: Session):
+def test_cart_clear_without_trailing_slash(client: TestClient, db_session: Session):
+    user = _create_user(db_session, "cart-clear-root@example.com", "9876543388")
+    variant = _create_product_bundle(db_session, "cart-clear-root", stock=4)
+
+    _login(client, user.email)
+    headers = _csrf_headers(client)
+    _add_cart_item(client, headers, variant, 2)
+
+    response = client.delete("/api/v1/cart", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["message"] == "Cart cleared"
+    assert _get_cart(client)["items"] == []
+
+
+def test_create_payment_order_validates_shiprocket_serviceability_when_configured(client: TestClient, db_session: Session, monkeypatch):
+    user = _create_user(db_session, "shiprocket-check@example.com", "9876543389")
+    variant = _create_product_bundle(db_session, "shiprocket-check", stock=2)
+    address = _create_address_via_api
+
+    _login(client, user.email)
+    headers = _csrf_headers(client)
+    _add_cart_item(client, headers, variant, 1)
+    saved_address = address(
+        client,
+        headers,
+        full_name="Checkout User",
+        phone="9876543210",
+        address_line1="Street 1",
+        city="Surat",
+        state="Gujarat",
+        pincode="395007",
+    )
+
+    monkeypatch.setattr(commerce_checkout, "validate_shiprocket_configuration", lambda strict=False: True)
+
+    def _raise_not_serviceable(*args, **kwargs):
+        raise RuntimeError("Delivery pincode 395007 is not serviceable")
+
+    monkeypatch.setattr(commerce_checkout, "check_pincode_serviceability", _raise_not_serviceable)
+
+    response = client.post(
+        "/create-payment-order",
+        headers=headers,
+        json={
+            "user_id": user.id,
+            "address_id": saved_address["id"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "Delivery pincode 395007 is not serviceable"
+
+
+def test_cart_user_route_requires_authenticated_ownership(client: TestClient, db_session: Session):
+    user = _create_user(db_session, "cart-owner@example.com", "9876543393")
+    other_user = _create_user(db_session, "cart-other@example.com", "9876543394")
+    variant = _create_product_bundle(db_session, "cart-owner", stock=3)
+
+    _login(client, user.email)
+    headers = _csrf_headers(client)
+    _add_cart_item(client, headers, variant, 1)
+
+    own_cart_response = client.get(f"/api/v1/cart/user/{user.id}")
+    assert own_cart_response.status_code == 200
+    assert own_cart_response.json()["data"]["items"][0]["variant_id"] == variant.id
+
+    forbidden_response = client.get(f"/api/v1/cart/user/{other_user.id}")
+    assert forbidden_response.status_code == 403
+
+
+def test_direct_order_creation_endpoint_is_removed(client: TestClient, db_session: Session):
     user = _create_user(db_session, "order-disabled@example.com", "9876543344")
     _login(client, user.email)
     headers = _csrf_headers(client)
@@ -509,10 +585,7 @@ def test_direct_order_creation_is_disabled(client: TestClient, db_session: Sessi
         headers=headers,
         json={"user_id": user.id, "address_id": 1},
     )
-    assert response.status_code == 400
-    payload = response.json()
-    message = payload.get("detail") or payload.get("message") or str(payload)
-    assert "disabled" in message.lower()
+    assert response.status_code == 404
 
 
 def test_checkout_payment_endpoints_require_authenticated_ownership(

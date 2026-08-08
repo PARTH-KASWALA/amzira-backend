@@ -2,79 +2,16 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
-from typing import List
 from app.db.session import get_db
 from app.api.deps import get_current_active_user
 from app.models.user import User
-from app.models.cart import CartItem
-from app.models.product import Product, ProductVariant
-from app.schemas.cart import CartItemCreate, CartItemUpdate, CartResponse
-from app.core.exceptions import ProductNotFound, InsufficientStock
+from app.schemas.cart import CartItemCreate, CartItemUpdate
 from app.utils.response import success
 from app.core.rate_limiter import limiter
+from app.services import cart_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-def _variant_additional_price(variant: ProductVariant | None) -> float:
-    return float(getattr(variant, "additional_price", 0.0) or 0.0)
-
-
-def _serialize_cart_for_user(db: Session, user_id: int) -> dict:
-    cart_items = db.query(CartItem).filter(CartItem.user_id == user_id).all()
-
-    items_response = []
-    subtotal = 0.0
-
-    for item in cart_items:
-        product = item.product
-        variant = item.variant
-        if not product or not variant:
-            logger.warning(
-                "cart_item_missing_relation",
-                extra={
-                    "user_id": user_id,
-                    "cart_item_id": item.id,
-                    "product_id": item.product_id,
-                    "variant_id": item.variant_id,
-                },
-            )
-            continue
-
-        primary_image = next((img.image_url for img in product.images if img.is_primary), None)
-        if not primary_image and product.images:
-            primary_image = product.images[0].image_url
-
-        current_price = float(product.sale_price if product.sale_price else product.base_price)
-        current_price += _variant_additional_price(variant)
-
-        total_price = current_price * item.quantity
-        subtotal += total_price
-
-        variant_details = f"Size: {variant.size}"
-        if variant.color:
-            variant_details += f", Color: {variant.color}"
-
-        items_response.append({
-            "id": item.id,
-            "product_id": product.id,
-            "product_name": product.name,
-            "product_slug": product.slug,
-            "product_image": primary_image,
-            "variant_id": variant.id,
-            "variant_details": variant_details,
-            "quantity": item.quantity,
-            "unit_price": current_price,
-            "total_price": total_price,
-            "stock_available": variant.stock_quantity
-        })
-
-    return {
-        "items": items_response,
-        "subtotal": subtotal,
-        "total_items": len(items_response),
-    }
 
 
 @router.get("/", response_model=dict)
@@ -86,7 +23,7 @@ def get_cart(
 ):
     """Get user's cart"""
     try:
-        payload = _serialize_cart_for_user(db, current_user.id)
+        payload = cart_service.get_cart(db, user_id=current_user.id)
         logger.info(
             "cart_loaded_authenticated",
             extra={"user_id": current_user.id, "item_count": payload["total_items"]},
@@ -104,11 +41,18 @@ def get_cart(
 def get_cart_by_user_id(
     request: Request,
     user_id: int,
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Compatibility cart route for user-id based storefront flows."""
     _ = request
-    user = db.query(User).filter(User.id == user_id).first()
+    if current_user.id != user_id and getattr(current_user.role, "value", None) != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized",
+        )
+
+    user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -116,7 +60,7 @@ def get_cart_by_user_id(
         )
 
     try:
-        payload = _serialize_cart_for_user(db, user_id)
+        payload = cart_service.get_cart(db, user_id=user_id)
         logger.info(
             "cart_loaded_by_user_id",
             extra={"user_id": user_id, "item_count": payload["total_items"]},
@@ -137,80 +81,10 @@ def add_to_cart(
     db: Session = Depends(get_db)
 ):
     """Add item to cart (authenticated users only)"""
-    if cart_item.variant_id is None or cart_item.variant_id <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="variant_id is required and must be selected",
-        )
-
-    # Verify product exists
-    product = db.query(Product).filter(
-        Product.id == cart_item.product_id,
-        Product.is_active == True
-    ).first()
-    
-    if not product:
-        raise ProductNotFound()
-    
-    # Verify variant exists
-    variant = db.query(ProductVariant).filter(
-        ProductVariant.id == cart_item.variant_id,
-        ProductVariant.product_id == cart_item.product_id,
-        ProductVariant.is_active == True
-    ).first()
-    
-    if not variant:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Product variant not found"
-        )
-    
-    # Check stock
-    if variant.stock_quantity < cart_item.quantity:
-        raise InsufficientStock(variant.stock_quantity)
-    
-    # Check if item already in cart
-    existing_item = db.query(CartItem).filter(
-        CartItem.user_id == current_user.id,
-        CartItem.product_id == cart_item.product_id,
-        CartItem.variant_id == cart_item.variant_id
-    ).first()
-    
-    if existing_item:
-        # Update quantity
-        new_quantity = existing_item.quantity + cart_item.quantity
-        if variant.stock_quantity < new_quantity:
-            raise InsufficientStock(variant.stock_quantity)
-        
-        existing_item.quantity = new_quantity
-        db.commit()
-        db.refresh(existing_item)
-        
-        return success(
-            data={"cart_item_id": existing_item.id},
-            message="Cart updated",
-        )
-    
-    # Calculate price
-    price = float(product.sale_price if product.sale_price else product.base_price)
-    price += _variant_additional_price(variant)
-    
-    # Add new item
-    new_cart_item = CartItem(
-        user_id=current_user.id,
-        product_id=cart_item.product_id,
-        variant_id=cart_item.variant_id,
-        quantity=cart_item.quantity,
-        price_at_addition=price
-    )
-    
-    db.add(new_cart_item)
-    db.commit()
-    db.refresh(new_cart_item)
-    
+    cart_item_record = cart_service.add_item(db, current_user=current_user, cart_item=cart_item)
     return success(
-        data={"cart_item_id": new_cart_item.id},
-        message="Item added to cart",
+        data={"cart_item_id": cart_item_record.id},
+        message="Cart updated" if cart_item_record.quantity > cart_item.quantity else "Item added to cart",
     )
 
 
@@ -224,25 +98,7 @@ def update_cart_item(
     db: Session = Depends(get_db)
 ):
     """Update cart item quantity"""
-    cart_item = db.query(CartItem).filter(
-        CartItem.id == item_id,
-        CartItem.user_id == current_user.id
-    ).first()
-    
-    if not cart_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Cart item not found"
-        )
-    
-    # Check stock
-    variant = cart_item.variant
-    if variant.stock_quantity < update_data.quantity:
-        raise InsufficientStock(variant.stock_quantity)
-    
-    cart_item.quantity = update_data.quantity
-    db.commit()
-    
+    cart_service.update_item(db, current_user=current_user, item_id=item_id, update_data=update_data)
     return success(message="Cart item updated")
 
 
@@ -255,20 +111,7 @@ def remove_from_cart(
     db: Session = Depends(get_db)
 ):
     """Remove item from cart"""
-    cart_item = db.query(CartItem).filter(
-        CartItem.id == item_id,
-        CartItem.user_id == current_user.id
-    ).first()
-    
-    if not cart_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Cart item not found"
-        )
-    
-    db.delete(cart_item)
-    db.commit()
-    
+    cart_service.remove_item(db, current_user=current_user, item_id=item_id)
     return success(message="Item removed from cart")
 
 
@@ -280,7 +123,15 @@ def clear_cart(
     db: Session = Depends(get_db)
 ):
     """Clear entire cart"""
-    db.query(CartItem).filter(CartItem.user_id == current_user.id).delete()
-    db.commit()
-    
+    cart_service.clear_cart(db, user_id=current_user.id)
     return success(message="Cart cleared")
+
+
+@router.delete("", include_in_schema=False)
+@limiter.limit("20/minute")
+def clear_cart_without_trailing_slash(
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    return clear_cart(request=request, current_user=current_user, db=db)

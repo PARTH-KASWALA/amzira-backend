@@ -1,17 +1,24 @@
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.order import Order, OrderStatus
+from app.models.return_request import ReturnRequest
 from app.services.checkout_payment_service import create_order_from_checkout_webhook_payload
 from app.services.payment_service import (
     cancel_payment_from_webhook,
     process_captured_payment_from_webhook,
     verify_razorpay_webhook_signature,
 )
-from app.services.shiprocket import fulfill_order
+from app.tasks.order_tasks import dispatch_fulfill_order
+from app.services.shiprocket import (
+    ShiprocketAPIError,
+    apply_return_tracking_update,
+    verify_shiprocket_webhook_signature,
+)
 from app.services.return_service import mark_order_delivered
 from app.utils.response import success
 
@@ -48,16 +55,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                 db.commit()
                 db.refresh(order)
                 try:
-                    result = fulfill_order(order)
-                    if (
-                        result.get("fulfilled")
-                        or result.get("shipment_id")
-                        or result.get("shiprocket_order_id")
-                        or result.get("awb_code")
-                    ):
-                        db.commit()
+                    dispatch_fulfill_order(order.id)
                 except Exception:
-                    db.rollback()
+                    pass
     elif event_name == "payment.failed":
         cancel_payment_from_webhook(payload=payload, db=db)
 
@@ -66,7 +66,17 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/shiprocket/webhook")
 async def shiprocket_webhook(request: Request, db: Session = Depends(get_db)):
-    payload = await request.json()
+    body = await request.body()
+    signature = (
+        request.headers.get("X-Shiprocket-Signature")
+        or request.headers.get("X-Webhook-Signature")
+    )
+    try:
+        verify_shiprocket_webhook_signature(body, signature)
+    except ShiprocketAPIError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    payload = json.loads(body)
     status_value = _normalize_shiprocket_status(
         payload.get("status")
         or payload.get("current_status")
@@ -87,18 +97,42 @@ async def shiprocket_webhook(request: Request, db: Session = Depends(get_db)):
         order = order_query.filter(Order.order_number == str(order_reference)).first()
 
     if order is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+        return_query = db.query(ReturnRequest)
+        return_request = None
+        if shipment_id:
+            return_request = return_query.filter(ReturnRequest.shiprocket_return_shipment_id == str(shipment_id)).first()
+        if return_request is None and awb_code:
+            return_request = return_query.filter(ReturnRequest.return_awb_code == str(awb_code)).first()
+        if return_request is None and order_reference:
+            return_request = return_query.filter(ReturnRequest.shiprocket_return_order_id == str(order_reference)).first()
+
+        if return_request is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+
+        apply_return_tracking_update(return_request, payload)
+        db.commit()
+        return success(
+            data={
+                "return_request_id": return_request.id,
+                "status": return_request.status.value,
+                "shiprocket_status": status_value,
+            },
+            message="Shiprocket return webhook processed",
+        )
 
     order.current_location = payload.get("location") or payload.get("current_location") or order.current_location
     order.shiprocket_last_status = status_value or order.shiprocket_last_status
+    order.courier_status = status_value or order.courier_status
     order.courier_name = payload.get("courier_name") or order.courier_name
     order.tracking_url = payload.get("tracking_url") or order.tracking_url
+    order.tracking_id = str(shipment_id) if shipment_id else order.tracking_id
 
-    if status_value == "SHIPPED":
+    if status_value in {"SHIPPED", "IN_TRANSIT"}:
         order.status = OrderStatus.SHIPPED
     elif status_value == "OUT_FOR_DELIVERY":
         order.status = OrderStatus.OUT_FOR_DELIVERY
     elif status_value == "DELIVERED":
+        order.delivery_date = order.delivery_date or datetime.utcnow()
         mark_order_delivered(order)
 
     db.commit()

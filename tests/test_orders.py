@@ -95,7 +95,7 @@ def _csrf_headers(client: TestClient) -> dict:
     return {"X-CSRF-Token": token}
 
 
-def test_empty_cart_order_rejection(client: TestClient, db_session: Session):
+def test_direct_order_creation_endpoint_is_removed_for_empty_cart(client: TestClient, db_session: Session):
     user = _create_user(db_session, "emptycart@example.com", "9876543213")
     address = _create_address(db_session, user.id)
     _login(client, user.email)
@@ -111,12 +111,10 @@ def test_empty_cart_order_rejection(client: TestClient, db_session: Session):
         },
     )
 
-    assert response.status_code == 400
-    payload = response.json()
-    assert payload["message"] == "Cart is empty"
+    assert response.status_code == 405
 
 
-def test_insufficient_stock(client: TestClient, db_session: Session):
+def test_direct_order_creation_endpoint_is_removed_for_stock_validation(client: TestClient, db_session: Session):
     user = _create_user(db_session, "stock@example.com", "9876543214")
     address = _create_address(db_session, user.id)
     variant = _create_product_variant(db_session, stock_quantity=1)
@@ -143,12 +141,10 @@ def test_insufficient_stock(client: TestClient, db_session: Session):
         },
     )
 
-    assert response.status_code == 400
-    payload = response.json()
-    assert "Insufficient stock" in payload["message"]
+    assert response.status_code == 405
 
 
-def test_order_number_uniqueness(client: TestClient, db_session: Session):
+def test_direct_order_creation_endpoint_is_removed_for_unique_order_number_flow(client: TestClient, db_session: Session):
     user = _create_user(db_session, "unique@example.com", "9876543215")
     address = _create_address(db_session, user.id)
     variant = _create_product_variant(db_session, stock_quantity=5)
@@ -176,8 +172,7 @@ def test_order_number_uniqueness(client: TestClient, db_session: Session):
             "idempotency_key": str(uuid4()),
         },
     )
-    assert first_response.status_code == 201
-    first_order_number = first_response.json()["data"]["order_number"]
+    assert first_response.status_code == 405
 
     second_cart_item = CartItem(
         user_id=user.id,
@@ -199,13 +194,10 @@ def test_order_number_uniqueness(client: TestClient, db_session: Session):
             "idempotency_key": str(uuid4()),
         },
     )
-    assert second_response.status_code == 201
-    second_order_number = second_response.json()["data"]["order_number"]
-
-    assert first_order_number != second_order_number
+    assert second_response.status_code == 405
 
 
-def test_order_creation_is_idempotent_with_same_key(client: TestClient, db_session: Session):
+def test_direct_order_creation_endpoint_is_removed_for_idempotency_flow(client: TestClient, db_session: Session):
     user = _create_user(db_session, "idem@example.com", "9876543216")
     address = _create_address(db_session, user.id)
     variant = _create_product_variant(db_session, stock_quantity=3)
@@ -235,8 +227,7 @@ def test_order_creation_is_idempotent_with_same_key(client: TestClient, db_sessi
             "idempotency_key": idem_key,
         },
     )
-    assert first_response.status_code == 201
-    first_order_number = first_response.json()["data"]["order_number"]
+    assert first_response.status_code == 405
 
     # Re-submit with same key; should return existing order and avoid duplicate.
     second_response = client.post(
@@ -249,10 +240,7 @@ def test_order_creation_is_idempotent_with_same_key(client: TestClient, db_sessi
             "idempotency_key": idem_key,
         },
     )
-    assert second_response.status_code == 200
-    payload = second_response.json()
-    assert payload["message"] == "Order already exists"
-    assert payload["data"]["order_number"] == first_order_number
+    assert second_response.status_code == 405
 
 
 def test_get_orders_returns_empty_list(client: TestClient, db_session: Session):
@@ -270,40 +258,31 @@ def test_get_orders_returns_empty_list(client: TestClient, db_session: Session):
 def test_get_orders_returns_created_orders(client: TestClient, db_session: Session):
     user = _create_user(db_session, "orders-list@example.com", "9876543219")
     address = _create_address(db_session, user.id)
-    variant = _create_product_variant(db_session, stock_quantity=4)
-
-    db_session.add(
-        CartItem(
-            user_id=user.id,
-            product_id=variant.product_id,
-            variant_id=variant.id,
-            quantity=1,
-            price_at_addition=1000.0,
-        )
+    order = Order(
+        user_id=user.id,
+        order_number="AMZ-LIST-0001",
+        subtotal=1000.0,
+        tax_amount=0.0,
+        shipping_charge=0.0,
+        discount_amount=0.0,
+        total_amount=1000.0,
+        status=OrderStatus.CONFIRMED,
+        shipping_address_id=address.id,
+        billing_address_id=address.id,
+        idempotency_key=str(uuid4()),
+        stock_deducted=True,
     )
+    db_session.add(order)
     db_session.commit()
 
     _login(client, user.email)
-    create_response = client.post(
-        "/api/v1/orders/",
-        headers=_csrf_headers(client),
-        json={
-            "shipping_address_id": address.id,
-            "billing_address_id": address.id,
-            "payment_method": "cod",
-            "idempotency_key": str(uuid4()),
-        },
-    )
-    assert create_response.status_code == 201
-    created_order_number = create_response.json()["data"]["order_number"]
-
     response = client.get("/api/v1/orders/")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["message"] == "Orders retrieved"
     assert len(payload["data"]) == 1
-    assert payload["data"][0]["order_number"] == created_order_number
+    assert payload["data"][0]["order_number"] == order.order_number
 
 
 def test_order_detail_requires_authenticated_owner(client: TestClient, db_session: Session):

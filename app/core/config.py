@@ -60,10 +60,16 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 10485760  # 10MB
     ALLOWED_EXTENSIONS: List[str] = ["jpg", "jpeg", "png", "webp"]
     UPLOAD_DIR: str = "static/uploads/products"
+    R2_ACCOUNT_ID: str = ""
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
+    R2_BUCKET_NAME: str = ""
+    R2_PUBLIC_URL: str = ""
     
     # Environment
     ENVIRONMENT: str = "development"
     ENV: Optional[str] = Field(default=None)
+    TESTING: bool = False
 
     DEBUG: bool = False
     
@@ -72,13 +78,16 @@ class Settings(BaseSettings):
     
     # Monitoring (Optional - Add to .env for production)
     SENTRY_DSN: str = ""  # Optional: Sentry error tracking DSN
+    HEALTHCHECK_TOKEN: str = ""
 
     # Shiprocket
     SHIPROCKET_EMAIL: str = ""
     SHIPROCKET_PASSWORD: str = ""
+    SHIPROCKET_WEBHOOK_SECRET: str = ""
     SHIPROCKET_BASE_URL: str = "https://apiv2.shiprocket.in/v1/external"
     SHIPROCKET_CHANNEL_ID: str = ""
     SHIPROCKET_PICKUP_LOCATION: str = "Primary"
+    SHIPROCKET_PICKUP_POSTCODE: str = ""
     SHIPROCKET_DEFAULT_WEIGHT_KG: float = 0.5
     SHIPROCKET_DEFAULT_LENGTH_CM: int = 10
     SHIPROCKET_DEFAULT_BREADTH_CM: int = 10
@@ -91,6 +100,8 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"  # Default Redis URL
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    CELERY_TASK_ALWAYS_EAGER: bool = False
+    CELERY_TASK_STORE_EAGER_RESULT: bool = False
     
     # Admin Security
     ADMIN_ALLOWED_IPS: str = ""  # Must be set via env in production
@@ -174,6 +185,18 @@ class Settings(BaseSettings):
                 raise ValueError("RAZORPAY_KEY_ID must use live key in production")
             if any(origin == "*" for origin in self.BACKEND_CORS_ORIGINS):
                 raise ValueError("BACKEND_CORS_ORIGINS cannot contain '*' in production")
+            if not (self.HEALTHCHECK_TOKEN or "").strip():
+                raise ValueError("HEALTHCHECK_TOKEN must be set in production")
+            if not str(self.FRONTEND_URL or "").startswith("https://"):
+                raise ValueError("FRONTEND_URL must use https in production")
+            if not self.r2_enabled:
+                raise ValueError("Cloudflare R2 must be configured in production")
+        if self.SHIPROCKET_PICKUP_POSTCODE and not str(self.SHIPROCKET_PICKUP_POSTCODE).isdigit():
+            raise ValueError("SHIPROCKET_PICKUP_POSTCODE must be numeric")
+        if self.SHIPROCKET_PICKUP_POSTCODE and len(str(self.SHIPROCKET_PICKUP_POSTCODE)) != 6:
+            raise ValueError("SHIPROCKET_PICKUP_POSTCODE must be 6 digits")
+        if bool(self.SHIPROCKET_EMAIL.strip()) != bool(self.SHIPROCKET_PASSWORD.strip()):
+            raise ValueError("SHIPROCKET_EMAIL and SHIPROCKET_PASSWORD must be configured together")
         return self
 
     @property
@@ -190,6 +213,22 @@ class Settings(BaseSettings):
         if ip in {"127.0.0.1", "::1"}:
             return True
         return ip in self.trusted_proxy_ips
+
+    @property
+    def r2_enabled(self) -> bool:
+        return all(
+            [
+                self.R2_ACCOUNT_ID.strip(),
+                self.R2_ACCESS_KEY_ID.strip(),
+                self.R2_SECRET_ACCESS_KEY.strip(),
+                self.R2_BUCKET_NAME.strip(),
+                self.R2_PUBLIC_URL.strip(),
+            ]
+        )
+
+    @property
+    def r2_endpoint_url(self) -> str:
+        return f"https://{self.R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
     model_config = {
         "env_file": str(ENV_FILE),

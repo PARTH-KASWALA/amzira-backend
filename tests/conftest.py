@@ -8,6 +8,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 os.environ["ENVIRONMENT"] = "development"
+os.environ["TESTING"] = "true"
+os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"
+os.environ["CELERY_TASK_STORE_EAGER_RESULT"] = "false"
 
 import app.models  # noqa: F401
 import app.models.return_request  # noqa: F401
