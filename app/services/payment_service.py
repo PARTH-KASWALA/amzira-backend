@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.order import Order, OrderStatus
+from app.models.checkout_payment_intent import CheckoutPaymentIntent, CheckoutPaymentIntentStatus
 from app.models.product import ProductVariant
 from app.models.payment import Payment, PaymentMethod, PaymentStatus
 from app.tasks.order_tasks import dispatch_fulfill_order
@@ -244,9 +245,16 @@ def _mark_payment_success(
     db: Session,
 ) -> Order:
     if payment.payment_status == PaymentStatus.SUCCESS:
+        if payment.razorpay_payment_id and payment.razorpay_payment_id != razorpay_payment_id:
+            logger.warning(
+                "duplicate_capture_ignored order_id=%s existing_payment_id=%s incoming_payment_id=%s",
+                payment.order_id,
+                payment.razorpay_payment_id,
+                razorpay_payment_id,
+            )
         return payment.order
-    if payment.payment_status == PaymentStatus.FAILED:
-        raise HTTPException(status_code=409, detail="Payment already marked failed")
+    if payment.payment_status == PaymentStatus.REFUNDED:
+        raise HTTPException(status_code=409, detail="Payment has already been refunded")
 
     order = payment.order
     locked_variants = {}
@@ -278,6 +286,13 @@ def _mark_payment_success(
 
 
 def _mark_payment_failed(payment: Payment, gateway_response: dict | None = None) -> Order:
+    if payment.payment_status in {PaymentStatus.SUCCESS, PaymentStatus.REFUNDED}:
+        logger.info(
+            "stale_payment_failure_ignored order_id=%s payment_status=%s",
+            payment.order_id,
+            payment.payment_status.value,
+        )
+        return payment.order
     payment.payment_status = PaymentStatus.FAILED
     if gateway_response is not None:
         payment.gateway_response = json.dumps(gateway_response)
@@ -301,8 +316,6 @@ def process_verified_payment(
         raise HTTPException(status_code=404, detail="Payment record not found")
 
     if not verify_payment_signature(razorpay_order_id, razorpay_payment_id, razorpay_signature):
-        _mark_payment_failed(payment)
-        db.commit()
         raise HTTPException(status_code=400, detail="Invalid payment signature")
 
     try:
@@ -340,6 +353,10 @@ def process_captured_payment_from_webhook(payload: dict, db: Session) -> Order |
     if payment is None:
         return None
 
+    webhook_amount = payment_entity.get("amount")
+    if webhook_amount is not None and int(webhook_amount) != _to_paise(payment.amount):
+        raise HTTPException(status_code=409, detail="Captured payment amount does not match order")
+
     was_success = payment.payment_status == PaymentStatus.SUCCESS
     try:
         order = _mark_payment_success(
@@ -374,6 +391,17 @@ def cancel_payment_from_webhook(payload: dict, db: Session) -> Order | None:
         .first()
     )
     if payment is None:
+        intent = (
+            db.query(CheckoutPaymentIntent)
+            .filter(CheckoutPaymentIntent.razorpay_order_id == razorpay_order_id)
+            .with_for_update()
+            .first()
+        )
+        if intent is None:
+            return None
+        if intent.status != CheckoutPaymentIntentStatus.SUCCESS:
+            intent.failure_reason = "Razorpay reported a failed payment attempt"
+            db.commit()
         return None
 
     _mark_payment_failed(payment, gateway_response=payload)

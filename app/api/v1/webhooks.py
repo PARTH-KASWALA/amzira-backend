@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -19,10 +20,11 @@ from app.services.shiprocket import (
     apply_return_tracking_update,
     verify_shiprocket_webhook_signature,
 )
-from app.services.return_service import mark_order_delivered
+from app.services.return_service import apply_razorpay_refund_webhook, mark_order_delivered
 from app.utils.response import success
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _normalize_shiprocket_status(value: str | None) -> str | None:
@@ -47,7 +49,10 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
     event_name = payload.get("event")
 
-    if event_name == "payment.captured":
+    if event_name in {"refund.created", "refund.processed", "refund.failed"}:
+        apply_razorpay_refund_webhook(db, payload)
+        db.commit()
+    elif event_name == "payment.captured":
         order = process_captured_payment_from_webhook(payload=payload, db=db)
         if order is None:
             order = create_order_from_checkout_webhook_payload(db=db, payload=payload)
@@ -57,7 +62,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                 try:
                     dispatch_fulfill_order(order.id)
                 except Exception:
-                    pass
+                    logger.exception("checkout_fulfillment_dispatch_failed", extra={"order_id": order.id})
     elif event_name == "payment.failed":
         cancel_payment_from_webhook(payload=payload, db=db)
 

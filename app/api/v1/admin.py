@@ -1,14 +1,15 @@
 import csv
+import json
 import logging
 import zipfile
 from io import BytesIO, StringIO
-from xml.etree import ElementTree as ET
+from defusedxml import ElementTree as ET
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Body, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, ValidationError
 from slugify import slugify
 from app.db.session import get_db
 from app.api.deps import require_admin
@@ -17,6 +18,8 @@ from app.models.product import Product, ProductImage, ProductVariant, Occasion
 from app.models.category import Category, Subcategory
 from app.models.order import Order, OrderStatus
 from app.schemas.product import ProductCreate
+from app.schemas.catalog_import import CatalogImportRequest
+from app.services.catalog_import_service import CatalogImportValidationError, import_catalog
 from app.services.order_service import auto_cancel_pending_orders
 from app.core.rate_limiter import limiter
 from app.core.cache import invalidate_product_cache
@@ -41,6 +44,18 @@ BULK_UPLOAD_HEADERS = [
     "image_urls",
     "occasion_slugs",
 ]
+CATALOG_IMPORT_HEADERS = [
+    "product_slug", "name", "category_slug", "subcategory_slug", "base_price",
+    "sale_price", "description", "fabric", "care_instructions", "meta_title",
+    "meta_description", "audience", "collection", "tags", "status", "is_featured",
+    "is_bestseller", "is_new_arrival", "occasion_slugs", "image_urls", "sku",
+    "size", "color", "stock_quantity", "additional_price", "variant_is_active",
+    "external_source", "external_id", "style_code",
+]
+MAX_CATALOG_IMPORT_BYTES = 5 * 1024 * 1024
+MAX_XLSX_ENTRIES = 100
+MAX_XLSX_UNCOMPRESSED_BYTES = 10 * 1024 * 1024
+MAX_XLSX_XML_BYTES = 2 * 1024 * 1024
 
 
 class AdminTestEmailRequest(BaseModel):
@@ -94,6 +109,102 @@ def _parse_optional_int(value: str | None, default: int = 0) -> int:
     return int(raw)
 
 
+def _parse_pipe_list(value: str | None) -> list[str]:
+    return [item.strip() for item in str(value or "").split("|") if item.strip()]
+
+
+def _catalog_validation_detail(exc: ValidationError) -> list[dict]:
+    return [
+        {
+            "field": ".".join(str(part) for part in error["loc"]),
+            "code": error["type"],
+            "message": error["msg"],
+        }
+        for error in exc.errors(include_url=False, include_input=False)
+    ]
+
+
+def _catalog_request_from_csv(content: bytes, *, mode: str, dry_run: bool) -> CatalogImportRequest:
+    try:
+        rows = list(csv.DictReader(StringIO(content.decode("utf-8-sig"))))
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded") from exc
+    if not rows:
+        raise HTTPException(status_code=400, detail="Catalog CSV has no product rows")
+
+    missing_headers = [header for header in ("product_slug", "name", "category_slug", "base_price", "sku", "size", "stock_quantity") if header not in (rows[0] or {})]
+    if missing_headers:
+        raise HTTPException(status_code=400, detail=f"Missing CSV headers: {', '.join(missing_headers)}")
+
+    grouped: dict[str, list[tuple[int, dict[str, str]]]] = {}
+    for row_number, row in enumerate(rows, start=2):
+        slug = str(row.get("product_slug") or "").strip()
+        if not slug:
+            raise HTTPException(status_code=422, detail={"message": "Catalog validation failed", "errors": [{"row": row_number, "field": "product_slug", "message": "Field is required"}]})
+        grouped.setdefault(slug, []).append((row_number, row))
+
+    products: list[dict] = []
+    for product_slug, product_rows in grouped.items():
+        first_row_number, first = product_rows[0]
+        variants = []
+        for row_number, row in product_rows:
+            try:
+                stock_quantity = int(str(row.get("stock_quantity") or "").strip())
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail={"message": "Catalog validation failed", "errors": [{"row": row_number, "field": "stock_quantity", "message": "Must be an integer"}]}) from exc
+            variants.append(
+                {
+                    "sku": row.get("sku"),
+                    "size": row.get("size"),
+                    "color": row.get("color") or None,
+                    "stock_quantity": stock_quantity,
+                    "additional_price": row.get("additional_price") or "0",
+                    "is_active": _parse_bool(row.get("variant_is_active")) if str(row.get("variant_is_active") or "").strip() else True,
+                }
+            )
+
+        image_urls = _parse_pipe_list(first.get("image_urls"))
+        products.append(
+            {
+                "name": first.get("name"),
+                "slug": product_slug,
+                "category_slug": first.get("category_slug"),
+                "subcategory_slug": first.get("subcategory_slug") or None,
+                "base_price": first.get("base_price"),
+                "sale_price": first.get("sale_price") or None,
+                "description": first.get("description") or None,
+                "fabric": first.get("fabric") or None,
+                "care_instructions": first.get("care_instructions") or None,
+                "meta_title": first.get("meta_title") or None,
+                "meta_description": first.get("meta_description") or None,
+                "audience": first.get("audience") or "kids_girls",
+                "collection": first.get("collection") or None,
+                "tags": _parse_pipe_list(first.get("tags")),
+                "status": first.get("status") or "active",
+                "is_featured": _parse_bool(first.get("is_featured")),
+                "is_bestseller": _parse_bool(first.get("is_bestseller")),
+                "is_new_arrival": _parse_bool(first.get("is_new_arrival")),
+                "occasion_slugs": _parse_pipe_list(first.get("occasion_slugs")),
+                "images": [
+                    {"image_url": url, "display_order": index, "is_primary": index == 0}
+                    for index, url in enumerate(image_urls)
+                ],
+                "variants": variants,
+                "external_source": first.get("external_source") or None,
+                "external_id": first.get("external_id") or None,
+                "style_code": first.get("style_code") or None,
+                "_source_row": first_row_number,
+            }
+        )
+
+    for product in products:
+        product.pop("_source_row", None)
+    try:
+        return CatalogImportRequest(products=products, mode=mode, dry_run=dry_run)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail={"message": "Catalog validation failed", "errors": _catalog_validation_detail(exc)}) from exc
+
+
 def _build_unique_product_slug(db: Session, name: str) -> str:
     base_slug = _normalize_slug(name)
     slug = base_slug
@@ -104,12 +215,32 @@ def _build_unique_product_slug(db: Session, name: str) -> str:
     return slug
 
 
+def _safe_xlsx_xml_root(content: bytes):
+    if len(content) > MAX_XLSX_XML_BYTES:
+        raise HTTPException(status_code=400, detail="XLSX XML entry exceeds the 2 MB safety limit")
+    upper_content = content.upper()
+    if b"<!DOCTYPE" in upper_content or b"<!ENTITY" in upper_content:
+        raise HTTPException(status_code=400, detail="XLSX contains prohibited XML declarations")
+    return ET.fromstring(content)
+
+
 def _extract_xlsx_rows(content: bytes) -> list[dict[str, str]]:
     namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with zipfile.ZipFile(BytesIO(content)) as workbook:
+        entries = workbook.infolist()
+        if len(entries) > MAX_XLSX_ENTRIES:
+            raise HTTPException(status_code=400, detail="XLSX contains too many archive entries")
+        total_uncompressed = sum(entry.file_size for entry in entries)
+        if total_uncompressed > MAX_XLSX_UNCOMPRESSED_BYTES:
+            raise HTTPException(status_code=400, detail="XLSX exceeds the 10 MB uncompressed safety limit")
+        if any(entry.file_size > 0 and entry.compress_size == 0 for entry in entries):
+            raise HTTPException(status_code=400, detail="XLSX contains an invalid compressed entry")
+        if any(entry.compress_size and entry.file_size / entry.compress_size > 100 for entry in entries):
+            raise HTTPException(status_code=400, detail="XLSX compression ratio exceeds the safety limit")
+
         shared_strings: list[str] = []
         if "xl/sharedStrings.xml" in workbook.namelist():
-            shared_root = ET.fromstring(workbook.read("xl/sharedStrings.xml"))
+            shared_root = _safe_xlsx_xml_root(workbook.read("xl/sharedStrings.xml"))
             for node in shared_root.findall("main:si", namespace):
                 parts = [segment.text or "" for segment in node.findall(".//main:t", namespace)]
                 shared_strings.append("".join(parts))
@@ -118,7 +249,7 @@ def _extract_xlsx_rows(content: bytes) -> list[dict[str, str]]:
         if sheet_name not in workbook.namelist():
             raise HTTPException(status_code=400, detail="XLSX upload must include sheet1.xml")
 
-        sheet_root = ET.fromstring(workbook.read(sheet_name))
+        sheet_root = _safe_xlsx_xml_root(workbook.read(sheet_name))
         rows: list[list[str]] = []
         for row in sheet_root.findall(".//main:sheetData/main:row", namespace):
             values: list[str] = []
@@ -1173,7 +1304,121 @@ def get_inventory_overview(
     )
 
 
-@router.get("/products/bulk-upload/template")
+@router.get("/products/catalog-import/template")
+@limiter.limit("20/minute")
+def catalog_import_template(
+    request: Request,
+    current_admin: User = Depends(require_admin),
+):
+    _ = request
+    return success(
+        data={
+            "format": "One CSV row per exact SKU. Separate list values with |.",
+            "headers": CATALOG_IMPORT_HEADERS,
+            "sample_rows": [
+                {
+                    "product_slug": "ruby-pattu-pavadai",
+                    "name": "Ruby Pattu Pavadai",
+                    "category_slug": "pattu-pavadai",
+                    "subcategory_slug": "",
+                    "base_price": "3499",
+                    "sale_price": "3199",
+                    "description": "South Indian festive lehenga set for girls",
+                    "fabric": "Art Silk",
+                    "care_instructions": "Dry clean only",
+                    "meta_title": "Ruby Pattu Pavadai for Girls",
+                    "meta_description": "Shop a festive South Indian pattu pavadai for girls.",
+                    "audience": "kids_girls",
+                    "collection": "Festive 2026",
+                    "tags": "south-indian|festive|girls",
+                    "status": "active",
+                    "is_featured": "true",
+                    "is_bestseller": "false",
+                    "is_new_arrival": "true",
+                    "occasion_slugs": "festive|wedding",
+                    "image_urls": "https://cdn.amzira.com/products/ruby-front.jpg|https://cdn.amzira.com/products/ruby-back.jpg",
+                    "sku": "AMZ-RUBY-24-RD",
+                    "size": "24",
+                    "color": "Ruby Red",
+                    "stock_quantity": "4",
+                    "additional_price": "0",
+                    "variant_is_active": "true",
+                    "external_source": "myntra",
+                    "external_id": "STYLE-001",
+                    "style_code": "ETHZY-001",
+                }
+            ],
+        },
+        message="Production catalog import template retrieved",
+    )
+
+
+@router.post("/products/catalog-import/json")
+@limiter.limit("5/10 minutes")
+def catalog_import_json(
+    request: Request,
+    payload: CatalogImportRequest,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    _ = request
+    try:
+        report = import_catalog(db, payload)
+    except CatalogImportValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Catalog validation failed; no records were changed", "errors": exc.errors},
+        ) from exc
+    if not payload.dry_run:
+        invalidate_product_cache(slugs=report.get("changed_slugs"))
+    return success(data=report, message="Catalog dry run passed" if payload.dry_run else "Catalog imported atomically")
+
+
+@router.post("/products/catalog-import")
+@limiter.limit("5/10 minutes")
+async def catalog_import_file(
+    request: Request,
+    file: UploadFile = File(...),
+    mode: str = Query("create", pattern="^(create|upsert)$"),
+    dry_run: bool = Query(False),
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    _ = request
+    content = await file.read(MAX_CATALOG_IMPORT_BYTES + 1)
+    if len(content) > MAX_CATALOG_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="Catalog import exceeds the 5 MB limit")
+
+    filename = str(file.filename or "").lower()
+    if filename.endswith(".csv"):
+        payload = _catalog_request_from_csv(content, mode=mode, dry_run=dry_run)
+    elif filename.endswith(".json"):
+        try:
+            raw_payload = json.loads(content.decode("utf-8"))
+            if isinstance(raw_payload, list):
+                raw_payload = {"products": raw_payload}
+            raw_payload["mode"] = mode
+            raw_payload["dry_run"] = dry_run
+            payload = CatalogImportRequest.model_validate(raw_payload)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValidationError) as exc:
+            errors = _catalog_validation_detail(exc) if isinstance(exc, ValidationError) else [{"field": "file", "code": "invalid_json", "message": str(exc)}]
+            raise HTTPException(status_code=422, detail={"message": "Catalog validation failed", "errors": errors}) from exc
+    else:
+        raise HTTPException(status_code=400, detail="Production catalog import supports .csv and .json files")
+
+    try:
+        report = import_catalog(db, payload)
+    except CatalogImportValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Catalog validation failed; no records were changed", "errors": exc.errors},
+        ) from exc
+    if not dry_run:
+        invalidate_product_cache(slugs=report.get("changed_slugs"))
+    return success(data=report, message="Catalog dry run passed" if dry_run else "Catalog imported atomically")
+
+
+@router.get("/products/bulk-upload/template", deprecated=True)
 @limiter.limit("20/minute")
 def download_bulk_upload_template(
     request: Request,
@@ -1206,7 +1451,7 @@ def download_bulk_upload_template(
 
 # app/api/v1/admin.py
 
-@router.post("/products/bulk-upload")
+@router.post("/products/bulk-upload", deprecated=True)
 @limiter.limit("10/minute")
 async def bulk_upload_products(
     request: Request,
@@ -1215,7 +1460,9 @@ async def bulk_upload_products(
     db: Session = Depends(get_db)
 ):
     """Admin: Bulk upload products from CSV or XLSX."""
-    content = await file.read()
+    content = await file.read(MAX_CATALOG_IMPORT_BYTES + 1)
+    if len(content) > MAX_CATALOG_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="Bulk upload exceeds the 5 MB limit")
     rows = _extract_bulk_rows(file.filename or "", content)
 
     created = []

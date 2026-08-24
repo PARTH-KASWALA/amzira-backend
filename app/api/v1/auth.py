@@ -1,9 +1,13 @@
 from datetime import datetime, timedelta
+import logging
+import re
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from jose import jwt
-from pydantic import BaseModel, EmailStr
+import jwt
+from jwt import InvalidTokenError as JWTError
+from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -27,10 +31,23 @@ from app.schemas.user import UserCreate, UserLogin, UserResponse
 from app.utils.response import success
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if len(value) < 8 or not re.search(r"[A-Z]", value) or not re.search(r"[a-z]", value) or not re.search(r"\d", value):
+            raise ValueError("Password must be at least 8 characters and include uppercase, lowercase, and a digit")
+        return value
 
 
 def _blacklist_token(db: Session, token: str, reason: str) -> None:
@@ -56,11 +73,13 @@ def _blacklist_token(db: Session, token: str, reason: str) -> None:
     )
 
 
-def _create_password_reset_token(email: str, expires_minutes: int = 30) -> str:
+def _create_password_reset_token(user: User, expires_minutes: int = 30) -> str:
     expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
     payload = {
-        "sub": email,
+        "sub": str(user.id),
+        "email": user.email,
         "type": "password_reset",
+        "jti": str(uuid.uuid4()),
         "exp": expire,
     }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
@@ -231,8 +250,6 @@ async def login(request: Request, db: Session = Depends(get_db)):
                     "email": user.email,
                     "role": user.role.value,
                 },
-                "access_token": access_token,
-                "refresh_token": refresh_token,
             },
             message="Login successful",
         )
@@ -354,13 +371,56 @@ def forgot_password(
     user = db.query(User).filter(User.email == payload.email).first()
 
     if user and user.is_active:
-        token = _create_password_reset_token(user.email)
+        token = _create_password_reset_token(user)
         try:
             send_password_reset.delay(user.email, token)
         except Exception:
-            # Intentionally avoid leaking internals to callers.
-            pass
+            logger.exception("password_reset_email_enqueue_failed")
 
     return success(
         message="If an account exists, password reset instructions have been sent.",
     )
+
+
+@router.post("/reset-password")
+@limiter.limit("5/minute")
+def reset_password(
+    request: Request,
+    payload: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        claims = jwt.decode(payload.token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except JWTError as exc:
+        raise HTTPException(status_code=400, detail="Password reset token is invalid or expired") from exc
+
+    if claims.get("type") != "password_reset" or not claims.get("jti") or not claims.get("sub"):
+        raise HTTPException(status_code=400, detail="Password reset token is invalid or expired")
+    if db.query(TokenBlacklist.id).filter(TokenBlacklist.jti == claims["jti"]).first():
+        raise HTTPException(status_code=400, detail="Password reset token has already been used")
+
+    try:
+        user_id = int(claims["sub"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Password reset token is invalid or expired") from exc
+    user = db.query(User).filter(User.id == user_id, User.email == claims.get("email"), User.is_active == True).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Password reset token is invalid or expired")
+
+    user.password_hash = hash_password(payload.new_password)
+    user.session_version = (user.session_version or 0) + 1
+    db.add(
+        TokenBlacklist(
+            jti=claims["jti"],
+            user_id=user.id,
+            expires_at=datetime.utcfromtimestamp(claims["exp"]),
+            reason="password_reset",
+        )
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Password reset token has already been used") from exc
+
+    return success(message="Password reset successful. Please sign in with your new password.")

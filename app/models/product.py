@@ -7,6 +7,8 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    literal_column,
+    Numeric,
     String,
     Table,
     Text,
@@ -31,6 +33,13 @@ product_occasions = Table(
 
 class Product(Base):
     __tablename__ = "products"
+    __table_args__ = (
+        UniqueConstraint(
+            "external_source",
+            "external_id",
+            name="uq_products_external_source_id",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=False)
@@ -39,15 +48,24 @@ class Product(Base):
     name = Column(String(200), nullable=False, index=True)
     slug = Column(String(250), unique=True, nullable=False, index=True)
     description = Column(Text, nullable=True)
+    external_source = Column(String(50), nullable=True)
+    external_id = Column(String(100), nullable=True)
+    style_code = Column(String(100), nullable=True, index=True)
+    audience = Column(String(50), default="kids_girls", nullable=False)
+    collection = Column(String(100), nullable=True)
+    tags = Column(Text, nullable=True)
     
     # Pricing
-    base_price = Column(Float, nullable=False)
-    sale_price = Column(Float, nullable=True)
+    base_price = Column(Numeric(10, 2), nullable=False)
+    sale_price = Column(Numeric(10, 2), nullable=True)
     discount_percentage = Column(Integer, default=0)
     
     # Status
     is_active = Column(Boolean, default=True, nullable=False)
     is_featured = Column(Boolean, default=False)
+    catalog_status = Column(String(20), default="active", nullable=False)
+    is_bestseller = Column(Boolean, default=False, nullable=False)
+    is_new_arrival = Column(Boolean, default=False, nullable=False)
     
     # Ratings
     avg_rating = Column(Float, default=0.0, nullable=False)
@@ -94,11 +112,23 @@ class Product(Base):
 # Composite indexes for performance
 Index('ix_products_category_id', Product.category_id)
 Index('idx_product_category_active', Product.category_id, Product.is_active)
+Index('ix_products_category_active', Product.category_id, Product.is_active)
 Index('idx_product_price_range', Product.sale_price, Product.base_price)
+Index(
+    'ix_products_search_tsv_gin',
+    func.to_tsvector(
+        literal_column("'simple'"),
+        func.coalesce(Product.name, literal_column("''"))
+        + literal_column("' '")
+        + func.coalesce(Product.description, literal_column("''")),
+    ),
+    postgresql_using='gin',
+)
 
 
 class ProductImage(Base):
     __tablename__ = "product_images"
+    __table_args__ = (Index("ix_product_images_product_id", "product_id"),)
 
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
@@ -119,7 +149,7 @@ class ProductVariant(Base):
             "stock_quantity >= 0",
             name="ck_product_variants_stock_non_negative",
         ),
-        UniqueConstraint("sku", name="uq_product_variants_sku"),
+        Index("ix_product_variants_sku", "sku", unique=True),
         Index("ix_product_variants_product_id", "product_id"),
     )
 
@@ -131,7 +161,7 @@ class ProductVariant(Base):
     sku = Column(String(100), nullable=False)
     
     stock_quantity = Column(Integer, default=0, nullable=False)
-    additional_price = Column(Float, default=0.0)  # Extra cost for this variant
+    additional_price = Column(Numeric(10, 2), default=0.0)  # Extra cost for this variant
     
     is_active = Column(Boolean, default=True)
 

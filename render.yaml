@@ -1,0 +1,295 @@
+previews:
+  generation: off
+
+envVarGroups:
+  - name: amzira-production-common
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "False"
+      - key: TESTING
+        value: "False"
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "30"
+      - key: REFRESH_TOKEN_EXPIRE_DAYS
+        value: "7"
+      - key: BACKEND_CORS_ORIGINS
+        value: '["https://amzira.com","https://www.amzira.com"]'
+      - key: FRONTEND_URL
+        value: https://amzira.com
+      - key: TRUST_PROXY_HEADERS
+        value: "True"
+      - key: TRUSTED_PROXY_IPS
+        value: 127.0.0.1,::1
+      - key: SMTP_HOST
+        value: smtp.resend.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        value: resend
+      - key: EMAILS_FROM_EMAIL
+        value: noreply@amzira.com
+      - key: EMAILS_FROM_NAME
+        value: AMZIRA
+      - key: EMAILS_FROM_ORDERS
+        value: orders@amzira.com
+      - key: EMAILS_FROM_SHIPPING
+        value: shipping@amzira.com
+      - key: EMAILS_FROM_SUPPORT
+        value: support@amzira.com
+      - key: SHIPROCKET_BASE_URL
+        value: https://apiv2.shiprocket.in/v1/external
+      - key: SHIPROCKET_PICKUP_LOCATION
+        value: Primary
+      - key: SHIPROCKET_DEFAULT_WEIGHT_KG
+        value: "0.5"
+      - key: SHIPROCKET_DEFAULT_LENGTH_CM
+        value: "10"
+      - key: SHIPROCKET_DEFAULT_BREADTH_CM
+        value: "10"
+      - key: SHIPROCKET_DEFAULT_HEIGHT_CM
+        value: "5"
+      - key: SHIPROCKET_TOKEN_TTL_SECONDS
+        value: "864000"
+      - key: SHIPROCKET_MAX_RETRIES
+        value: "3"
+      - key: R2_BUCKET_NAME
+        value: amzira-products
+      - key: R2_PUBLIC_URL
+        value: https://cdn.amzira.com
+      - key: UPLOAD_DIR
+        value: static/uploads/products
+      - key: MAX_UPLOAD_SIZE
+        value: "10485760"
+      - key: ALLOWED_EXTENSIONS
+        value: '["jpg","jpeg","png","webp"]'
+      - key: CELERY_TASK_ALWAYS_EAGER
+        value: "False"
+      - key: CELERY_TASK_STORE_EAGER_RESULT
+        value: "False"
+      - key: GST_RATE
+        value: "0.05"
+      - key: FREE_SHIPPING_THRESHOLD
+        value: "2000"
+      - key: DEFAULT_SHIPPING_CHARGE
+        value: "100"
+      - key: ALLOW_STARTUP_SCHEMA_PATCHING
+        value: "False"
+
+services:
+  - type: keyvalue
+    name: amzira-redis
+    plan: starter
+    region: singapore
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+
+  - type: web
+    name: amzira-api
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2 --proxy-headers --forwarded-allow-ips '*'
+    preDeployCommand: alembic upgrade head && python -m app.db.init_db
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    domains:
+      - api.amzira.com
+    envVars:
+      - fromGroup: amzira-production-common
+      - key: DATABASE_URL
+        fromDatabase:
+          name: amzira-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: HEALTHCHECK_TOKEN
+        generateValue: true
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: ADMIN_ALLOWED_IPS
+        sync: false
+      - key: DEFAULT_ADMIN_PASSWORD
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SHIPROCKET_EMAIL
+        sync: false
+      - key: SHIPROCKET_PASSWORD
+        sync: false
+      - key: SHIPROCKET_WEBHOOK_SECRET
+        sync: false
+      - key: SHIPROCKET_CHANNEL_ID
+        sync: false
+      - key: SHIPROCKET_PICKUP_POSTCODE
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+
+  - type: worker
+    name: amzira-worker
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python scripts/wait_for_migrations.py && celery -A app.core.celery_app:celery_app worker --loglevel=INFO --queues=celery,emails --concurrency=2
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: amzira-production-common
+      - key: DATABASE_URL
+        fromDatabase:
+          name: amzira-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: SECRET_KEY
+        fromService: {type: web, name: amzira-api, envVarKey: SECRET_KEY}
+      - key: HEALTHCHECK_TOKEN
+        fromService: {type: web, name: amzira-api, envVarKey: HEALTHCHECK_TOKEN}
+      - key: RAZORPAY_KEY_ID
+        fromService: {type: web, name: amzira-api, envVarKey: RAZORPAY_KEY_ID}
+      - key: RAZORPAY_KEY_SECRET
+        fromService: {type: web, name: amzira-api, envVarKey: RAZORPAY_KEY_SECRET}
+      - key: RAZORPAY_WEBHOOK_SECRET
+        fromService: {type: web, name: amzira-api, envVarKey: RAZORPAY_WEBHOOK_SECRET}
+      - key: ADMIN_ALLOWED_IPS
+        fromService: {type: web, name: amzira-api, envVarKey: ADMIN_ALLOWED_IPS}
+      - key: SMTP_PASSWORD
+        fromService: {type: web, name: amzira-api, envVarKey: SMTP_PASSWORD}
+      - key: SHIPROCKET_EMAIL
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_EMAIL}
+      - key: SHIPROCKET_PASSWORD
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_PASSWORD}
+      - key: SHIPROCKET_WEBHOOK_SECRET
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_WEBHOOK_SECRET}
+      - key: SHIPROCKET_CHANNEL_ID
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_CHANNEL_ID}
+      - key: SHIPROCKET_PICKUP_POSTCODE
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_PICKUP_POSTCODE}
+      - key: R2_ACCOUNT_ID
+        fromService: {type: web, name: amzira-api, envVarKey: R2_ACCOUNT_ID}
+      - key: R2_ACCESS_KEY_ID
+        fromService: {type: web, name: amzira-api, envVarKey: R2_ACCESS_KEY_ID}
+      - key: R2_SECRET_ACCESS_KEY
+        fromService: {type: web, name: amzira-api, envVarKey: R2_SECRET_ACCESS_KEY}
+      - key: SENTRY_DSN
+        fromService: {type: web, name: amzira-api, envVarKey: SENTRY_DSN}
+
+  - type: worker
+    name: amzira-beat
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python scripts/wait_for_migrations.py && celery -A app.core.celery_app:celery_app beat --loglevel=INFO --schedule=/tmp/celerybeat-schedule
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: amzira-production-common
+      - key: DATABASE_URL
+        fromDatabase:
+          name: amzira-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: amzira-redis
+          property: connectionString
+      - key: SECRET_KEY
+        fromService: {type: web, name: amzira-api, envVarKey: SECRET_KEY}
+      - key: HEALTHCHECK_TOKEN
+        fromService: {type: web, name: amzira-api, envVarKey: HEALTHCHECK_TOKEN}
+      - key: RAZORPAY_KEY_ID
+        fromService: {type: web, name: amzira-api, envVarKey: RAZORPAY_KEY_ID}
+      - key: RAZORPAY_KEY_SECRET
+        fromService: {type: web, name: amzira-api, envVarKey: RAZORPAY_KEY_SECRET}
+      - key: RAZORPAY_WEBHOOK_SECRET
+        fromService: {type: web, name: amzira-api, envVarKey: RAZORPAY_WEBHOOK_SECRET}
+      - key: ADMIN_ALLOWED_IPS
+        fromService: {type: web, name: amzira-api, envVarKey: ADMIN_ALLOWED_IPS}
+      - key: SMTP_PASSWORD
+        fromService: {type: web, name: amzira-api, envVarKey: SMTP_PASSWORD}
+      - key: SHIPROCKET_EMAIL
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_EMAIL}
+      - key: SHIPROCKET_PASSWORD
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_PASSWORD}
+      - key: SHIPROCKET_WEBHOOK_SECRET
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_WEBHOOK_SECRET}
+      - key: SHIPROCKET_CHANNEL_ID
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_CHANNEL_ID}
+      - key: SHIPROCKET_PICKUP_POSTCODE
+        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_PICKUP_POSTCODE}
+      - key: R2_ACCOUNT_ID
+        fromService: {type: web, name: amzira-api, envVarKey: R2_ACCOUNT_ID}
+      - key: R2_ACCESS_KEY_ID
+        fromService: {type: web, name: amzira-api, envVarKey: R2_ACCESS_KEY_ID}
+      - key: R2_SECRET_ACCESS_KEY
+        fromService: {type: web, name: amzira-api, envVarKey: R2_SECRET_ACCESS_KEY}
+      - key: SENTRY_DSN
+        fromService: {type: web, name: amzira-api, envVarKey: SENTRY_DSN}
+
+databases:
+  - name: amzira-postgres
+    plan: basic-256mb
+    region: singapore
+    postgresMajorVersion: "15"
+    databaseName: amzira_db
+    user: amzira_user
+    diskSizeGB: 15
+    storageAutoscalingEnabled: true
+    ipAllowList: []

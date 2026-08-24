@@ -7,7 +7,7 @@ class Category(Base):
     __tablename__ = "categories"
 
     id = Column(Integer, primary_key=True, index=True)
-    parent_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
+    parent_id = Column(Integer, ForeignKey("categories.id"), nullable=True, index=True)
     name = Column(String(100), unique=True, nullable=False, index=True)
     slug = Column(String(100), unique=True, nullable=False, index=True)
     description = Column(String(500))

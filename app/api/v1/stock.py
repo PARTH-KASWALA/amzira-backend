@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,7 @@ from app.schemas.stock import InsufficientStockItem, StockCheckRequest, StockChe
 from app.utils.response import success
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _build_stock_response(payload: StockCheckRequest, db: Session) -> dict:
@@ -94,7 +97,7 @@ def check_stock_legacy(
                 payload = StockCheckRequest.model_validate({"items": items})
                 return _build_stock_response(payload, db)
             except Exception:
-                pass
+                logger.info("legacy_stock_cart_lookup_failed")
 
         raise HTTPException(
             status_code=400,

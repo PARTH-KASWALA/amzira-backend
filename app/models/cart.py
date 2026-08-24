@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, ForeignKey, DateTime, Float
+from sqlalchemy import Column, Integer, ForeignKey, DateTime, Float, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.base_class import Base
@@ -6,6 +6,7 @@ from app.db.base_class import Base
 
 class CartItem(Base):
     __tablename__ = "cart_items"
+    __table_args__ = (Index("ix_cart_items_user_id", "user_id"),)
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)

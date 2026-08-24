@@ -2,7 +2,8 @@ from datetime import datetime, timedelta
 import uuid
 
 from fastapi import HTTPException, status
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError as JWTError
 from passlib.context import CryptContext
 
 from app.core.config import settings

@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.api.deps import get_current_user, require_admin
 from app.models.user import User
 from app.services.coupon_service import CouponService
+from app.services import cart_service
 from app.schemas.coupon import CouponCreate, CouponUpdate, CouponResponse, ApplyCouponRequest, ApplyCouponResponse
 from app.utils.response import success
 
@@ -66,6 +67,9 @@ def validate_coupon(
 ):
     """Validate and preview coupon discount (public for authenticated users)."""
     result = CouponService.validate_and_apply_coupon(
-        db, current_user.id, request.coupon_code, request.order_total
+        db,
+        current_user.id,
+        request.coupon_code.strip().upper(),
+        cart_service.get_cart(db, user_id=current_user.id)["subtotal"],
     )
     return success(data=result.dict(), message="Coupon validated")

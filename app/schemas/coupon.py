@@ -38,6 +38,7 @@ class CouponResponse(BaseModel):
     max_discount: Optional[float]
     usage_limit: Optional[int]
     used_count: int
+    reserved_count: int
     per_user_limit: int
     is_active: bool
     expiry_date: Optional[datetime]
@@ -50,7 +51,7 @@ class CouponResponse(BaseModel):
 
 class ApplyCouponRequest(BaseModel):
     coupon_code: str
-    order_total: float
+    order_total: Optional[float] = Field(default=None, description="Deprecated; server cart total is authoritative")
 
 
 class ApplyCouponResponse(BaseModel):

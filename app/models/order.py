@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -21,6 +21,11 @@ class OrderStatus(str, enum.Enum):
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        Index("ix_orders_user_created_at", "user_id", "created_at"),
+        Index("ix_orders_status_created_at", "status", "created_at"),
+        Index("ix_orders_user_status", "user_id", "status"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     order_number = Column(String(50), unique=True, nullable=False, index=True)
@@ -85,6 +90,7 @@ class Order(Base):
 
 class OrderItem(Base):
     __tablename__ = "order_items"
+    __table_args__ = (Index("ix_order_items_order_id", "order_id"),)
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)

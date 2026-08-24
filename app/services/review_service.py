@@ -10,6 +10,7 @@ from app.models.order import Order, OrderItem, OrderStatus
 from app.models.user import User
 from app.schemas.review import ReviewCreate, ReviewUpdate, ReviewResponse, ReviewListResponse
 from app.utils.response import success, error
+from app.core.cache import invalidate_product_cache
 
 
 class ReviewService:
@@ -75,11 +76,11 @@ class ReviewService:
         )
         
         db.add(review)
+        db.flush()
+        ReviewService._recalculate_product_ratings(db, review_data.product_id)
         db.commit()
         db.refresh(review)
-        
-        # Recalculate product ratings
-        ReviewService._recalculate_product_ratings(db, review_data.product_id)
+        invalidate_product_cache()
         
         # Get user name
         user = db.query(User).filter(User.id == user_id).first()
@@ -161,11 +162,10 @@ class ReviewService:
         if review_data.comment is not None:
             review.comment = review_data.comment
         
+        ReviewService._recalculate_product_ratings(db, review.product_id)
         db.commit()
         db.refresh(review)
-        
-        # Recalculate product ratings
-        ReviewService._recalculate_product_ratings(db, review.product_id)
+        invalidate_product_cache()
         
         # Get user name
         user = db.query(User).filter(User.id == review.user_id).first()
@@ -200,7 +200,7 @@ class ReviewService:
         
         product_id = review.product_id
         db.delete(review)
-        db.commit()
-        
-        # Recalculate product ratings
+        db.flush()
         ReviewService._recalculate_product_ratings(db, product_id)
+        db.commit()
+        invalidate_product_cache()

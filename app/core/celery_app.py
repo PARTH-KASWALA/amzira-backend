@@ -49,6 +49,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.order_tasks.cleanup_expired_orders",
         "schedule": crontab(minute="*/5"),
     },
+    "release-expired-checkout-stock-every-5-min": {
+        "task": "app.tasks.order_tasks.release_expired_payment_reservations",
+        "schedule": crontab(minute="*/5"),
+    },
     "purge-expired-checkout-intents-hourly": {
         "task": "app.tasks.order_tasks.purge_expired_payment_intents",
         "schedule": crontab(minute=0),

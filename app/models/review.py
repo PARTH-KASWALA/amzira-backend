@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Text, Boolean, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -16,8 +16,8 @@ class Review(Base):
     comment = Column(Text, nullable=True)
     verified_purchase = Column(Boolean, default=False, nullable=False)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
     user = relationship("User", back_populates="reviews")
@@ -26,4 +26,6 @@ class Review(Base):
     # Ensure one review per user per product
     __table_args__ = (
         UniqueConstraint('user_id', 'product_id', name='unique_user_product_review'),
+        CheckConstraint('rating >= 1 AND rating <= 5', name='ck_reviews_rating_range'),
+        Index('ix_reviews_product_id', 'product_id'),
     )

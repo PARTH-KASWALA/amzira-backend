@@ -183,14 +183,43 @@ class Settings(BaseSettings):
                 raise ValueError("SECRET_KEY must be at least 32 chars and not use placeholders in production")
             if (self.RAZORPAY_KEY_ID or "").startswith("rzp_test_"):
                 raise ValueError("RAZORPAY_KEY_ID must use live key in production")
+            if not (self.RAZORPAY_KEY_ID or "").strip() or not (self.RAZORPAY_KEY_SECRET or "").strip():
+                raise ValueError("Razorpay credentials must be configured in production")
+            if not (self.RAZORPAY_WEBHOOK_SECRET or "").strip():
+                raise ValueError("RAZORPAY_WEBHOOK_SECRET must be set in production")
             if any(origin == "*" for origin in self.BACKEND_CORS_ORIGINS):
                 raise ValueError("BACKEND_CORS_ORIGINS cannot contain '*' in production")
+            if any(not origin.startswith("https://") for origin in self.BACKEND_CORS_ORIGINS):
+                raise ValueError("BACKEND_CORS_ORIGINS must use https in production")
             if not (self.HEALTHCHECK_TOKEN or "").strip():
                 raise ValueError("HEALTHCHECK_TOKEN must be set in production")
             if not str(self.FRONTEND_URL or "").startswith("https://"):
                 raise ValueError("FRONTEND_URL must use https in production")
             if not self.r2_enabled:
                 raise ValueError("Cloudflare R2 must be configured in production")
+            if not (self.SHIPROCKET_EMAIL or "").strip() or not (self.SHIPROCKET_PASSWORD or "").strip():
+                raise ValueError("Shiprocket credentials must be configured in production")
+            if not (self.SHIPROCKET_WEBHOOK_SECRET or "").strip():
+                raise ValueError("SHIPROCKET_WEBHOOK_SECRET must be set in production")
+            if not (self.SHIPROCKET_PICKUP_POSTCODE or "").strip():
+                raise ValueError("SHIPROCKET_PICKUP_POSTCODE must be set in production")
+            if self.DEBUG:
+                raise ValueError("DEBUG must be false in production")
+            if self.DATABASE_URL.lower().startswith("sqlite"):
+                raise ValueError("PostgreSQL must be used in production")
+            if "localhost" in self.REDIS_URL or "127.0.0.1" in self.REDIS_URL:
+                raise ValueError("REDIS_URL must use the deployed Redis service in production")
+            if any(
+                value in url
+                for url in (self.CELERY_BROKER_URL, self.CELERY_RESULT_BACKEND)
+                for value in ("localhost", "127.0.0.1")
+            ):
+                raise ValueError("Celery broker and result backend must use the deployed Redis service in production")
+            if not all(
+                str(value or "").strip()
+                for value in (self.SMTP_HOST, self.SMTP_USER, self.SMTP_PASSWORD, self.EMAILS_FROM_EMAIL)
+            ):
+                raise ValueError("SMTP credentials and EMAILS_FROM_EMAIL must be configured in production")
         if self.SHIPROCKET_PICKUP_POSTCODE and not str(self.SHIPROCKET_PICKUP_POSTCODE).isdigit():
             raise ValueError("SHIPROCKET_PICKUP_POSTCODE must be numeric")
         if self.SHIPROCKET_PICKUP_POSTCODE and len(str(self.SHIPROCKET_PICKUP_POSTCODE)) != 6:

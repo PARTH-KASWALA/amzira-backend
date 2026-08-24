@@ -51,6 +51,12 @@ class CheckoutRequest(BaseModel):
 class CreatePaymentOrderRequest(BaseModel):
     user_id: int = Field(..., gt=0)
     address_id: int = Field(..., gt=0)
+    coupon_code: Optional[str] = Field(default=None, min_length=1, max_length=50)
+
+    @field_validator("coupon_code")
+    @classmethod
+    def normalize_coupon_code(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip().upper() if value else None
 
 
 class VerifyPaymentRequest(BaseModel):

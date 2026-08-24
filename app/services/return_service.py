@@ -6,7 +6,9 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.models.order import Order, OrderStatus
-from app.models.return_request import ReturnRequest
+from app.models.payment import PaymentStatus
+from app.models.product import ProductVariant
+from app.models.return_request import ReturnRequest, ReturnStatus
 
 RETURN_WINDOW_HOURS = 36
 RETURN_STATUS_NOT_APPLICABLE = "not_applicable"
@@ -141,3 +143,90 @@ def get_existing_return_for_item(db: Session, order_item_id: int) -> ReturnReque
         .with_for_update()
         .first()
     )
+
+
+def restock_return_inventory(db: Session, return_request: ReturnRequest) -> None:
+    if return_request.inventory_restocked:
+        return
+    order_item = return_request.order_item
+    variant = (
+        db.query(ProductVariant)
+        .filter(ProductVariant.id == order_item.variant_id)
+        .with_for_update()
+        .first()
+    )
+    if variant is not None:
+        variant.stock_quantity += order_item.quantity
+    return_request.inventory_restocked = True
+
+
+def finalize_processed_refund(db: Session, return_request: ReturnRequest) -> None:
+    if return_request.status == ReturnStatus.REFUNDED:
+        return
+
+    restock_return_inventory(db, return_request)
+    return_request.status = ReturnStatus.REFUNDED
+    return_request.refund_error = None
+    return_request.resolved_at = utc_now()
+
+    order = return_request.order
+    payment = order.payment if order else None
+    if payment is None:
+        return
+
+    db.flush()
+    processed_total = sum(
+        (item.refund_amount or 0)
+        for item in order.returns
+        if item.status == ReturnStatus.REFUNDED
+    )
+    payment.refunded_amount = processed_total
+    all_items_refunded = bool(order.items) and all(
+        any(
+            request.order_item_id == order_item.id and request.status == ReturnStatus.REFUNDED
+            for request in order.returns
+        )
+        for order_item in order.items
+    )
+    if processed_total >= payment.amount:
+        payment.payment_status = PaymentStatus.REFUNDED
+        payment.refunded_at = utc_now()
+        order.status = OrderStatus.REFUNDED
+    elif all_items_refunded:
+        order.status = OrderStatus.RETURNED
+    else:
+        order.status = OrderStatus.RETURN_REQUESTED
+
+
+def apply_razorpay_refund_webhook(db: Session, payload: dict) -> ReturnRequest | None:
+    event_name = payload.get("event")
+    refund_entity = payload.get("payload", {}).get("refund", {}).get("entity", {})
+    refund_id = refund_entity.get("id")
+    if not refund_id:
+        return None
+
+    return_request = (
+        db.query(ReturnRequest)
+        .filter(ReturnRequest.refund_transaction_id == refund_id)
+        .with_for_update()
+        .first()
+    )
+    if return_request is None:
+        return None
+
+    import json
+
+    return_request.refund_gateway_response = json.dumps(refund_entity)
+    if event_name == "refund.processed":
+        finalize_processed_refund(db, return_request)
+    elif event_name == "refund.failed":
+        return_request.status = ReturnStatus.REFUND_FAILED
+        return_request.refund_error = (
+            refund_entity.get("error_description")
+            or refund_entity.get("error_reason")
+            or "Razorpay refund failed"
+        )[:500]
+    else:
+        return_request.status = ReturnStatus.REFUND_PENDING
+    db.flush()
+    return return_request

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 
@@ -60,6 +60,10 @@ class ProductListResponse(BaseModel):
     sale_price: Optional[float]
     discount_percentage: int
     is_featured: bool
+    is_bestseller: bool = False
+    is_new_arrival: bool = False
+    collection: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
     stock_quantity: int
     default_variant: Optional[ProductDefaultVariantResponse] = None
     category: CategoryResponse
@@ -93,4 +97,4 @@ class ProductCreate(BaseModel):
     fabric: Optional[str] = None
     care_instructions: Optional[str] = None
     is_featured: bool = False
-    occasion_ids: List[int] = []
+    occasion_ids: List[int] = Field(default_factory=list)

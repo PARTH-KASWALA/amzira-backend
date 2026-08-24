@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import json
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -11,10 +12,13 @@ from app.core.security import hash_password
 from app.models.address import Address
 from app.models.checkout_payment_intent import CheckoutPaymentIntent, CheckoutPaymentIntentStatus
 from app.models.category import Category
+from app.models.coupon import Coupon, DiscountType
+from app.models.coupon_usage import CouponUsage
 from app.models.order import Order
-from app.models.payment import Payment, PaymentStatus
+from app.models.payment import Payment, PaymentMethod, PaymentStatus
 from app.models.product import Product, ProductImage, ProductVariant
 from app.models.user import User
+from app.services.checkout_payment_service import expire_checkout_intents
 
 
 class _FakeRazorpayOrderClient:
@@ -212,7 +216,7 @@ def test_payment_verification_creates_order_and_clears_cart(
         headers=headers,
         json={"user_id": user.id, "address_id": address_id},
     )
-    assert prefixed_checkout_response.status_code == 404
+    assert prefixed_checkout_response.status_code == 200
 
     monkeypatch.setattr(
         commerce_checkout,
@@ -238,6 +242,10 @@ def test_payment_verification_creates_order_and_clears_cart(
     )
     assert created_intent is not None
     assert created_intent.status == CheckoutPaymentIntentStatus.PENDING
+    assert created_intent.stock_reserved is True
+    db_session.refresh(variant)
+    assert variant.stock_quantity == 2
+
 
     message = "order_test_checkout_123|pay_test_checkout_123"
     signature = hmac.new(
@@ -277,8 +285,150 @@ def test_payment_verification_creates_order_and_clears_cart(
     assert payment.payment_status == PaymentStatus.SUCCESS
 
     db_session.refresh(created_intent)
+    db_session.refresh(variant)
     assert created_intent.status == CheckoutPaymentIntentStatus.SUCCESS
     assert created_intent.created_order_id == created_order.id
+    assert created_intent.stock_reserved is False
+    assert created_intent.reservation_consumed_at is not None
+    assert variant.stock_quantity == 2
+
+
+def test_coupon_is_reserved_in_payment_total_and_consumed_once(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    user = _create_user(db_session, "coupon-checkout@example.com", "9876543312")
+    variant = _create_product_bundle(db_session, "coupon-checkout", stock=4)
+    coupon = Coupon(
+        code="FESTIVE10",
+        discount_type=DiscountType.PERCENTAGE,
+        discount_value=10,
+        min_order_value=1000,
+        usage_limit=1,
+        per_user_limit=1,
+        is_active=True,
+    )
+    db_session.add(coupon)
+    db_session.commit()
+    _login(client, user.email)
+    headers = _csrf_headers(client)
+    _add_cart_item(client, headers, variant, 2)
+    address = _create_address_via_api(
+        client,
+        headers,
+        full_name="Coupon User",
+        phone="9876543210",
+        address_line1="Street 10",
+        city="Surat",
+        state="Gujarat",
+        pincode="394101",
+    )
+    monkeypatch.setattr(commerce_checkout, "get_razorpay_client", lambda: _FakeRazorpayClient())
+
+    payment_order = client.post(
+        "/api/v1/create-payment-order",
+        headers=headers,
+        json={"user_id": user.id, "address_id": address["id"], "coupon_code": "festive10"},
+    )
+    assert payment_order.status_code == 200
+    payment_data = payment_order.json()["data"]
+    assert payment_data["discount"] == 240.0
+    assert payment_data["amount"] == 226800
+    db_session.refresh(coupon)
+    assert coupon.reserved_count == 1
+    assert coupon.used_count == 0
+
+    signature = hmac.new(
+        settings.RAZORPAY_KEY_SECRET.encode(),
+        b"order_test_checkout_123|pay_coupon_checkout_123",
+        hashlib.sha256,
+    ).hexdigest()
+    verified = client.post(
+        "/api/v1/verify-payment",
+        headers=headers,
+        json={
+            "razorpay_order_id": "order_test_checkout_123",
+            "razorpay_payment_id": "pay_coupon_checkout_123",
+            "razorpay_signature": signature,
+        },
+    )
+    assert verified.status_code == 201
+    order = db_session.query(Order).filter(Order.id == verified.json()["data"]["order_id"]).one()
+    db_session.refresh(coupon)
+    assert float(order.discount_amount) == 240.0
+    assert float(order.total_amount) == 2268.0
+    assert order.coupon_code == "FESTIVE10"
+    assert coupon.reserved_count == 0
+    assert coupon.used_count == 1
+
+
+def test_fully_discounted_checkout_skips_razorpay_and_creates_order(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    user = _create_user(db_session, "free-checkout@example.com", "9876543314")
+    variant = _create_product_bundle(db_session, "free-checkout", stock=4)
+    coupon = Coupon(
+        code="FREE5000",
+        discount_type=DiscountType.FIXED,
+        discount_value=5000,
+        per_user_limit=1,
+        is_active=True,
+    )
+    db_session.add(coupon)
+    db_session.commit()
+    _login(client, user.email)
+    headers = _csrf_headers(client)
+    _add_cart_item(client, headers, variant, 2)
+    address = _create_address_via_api(
+        client,
+        headers,
+        full_name="Free Checkout",
+        phone="9876543210",
+        address_line1="Discount Street",
+        city="Surat",
+        state="Gujarat",
+        pincode="395007",
+    )
+
+    def fail_if_razorpay_is_called():
+        raise AssertionError("Razorpay must not be called for a fully discounted order")
+
+    monkeypatch.setattr(commerce_checkout, "get_razorpay_client", fail_if_razorpay_is_called)
+    monkeypatch.setattr(
+        commerce_checkout,
+        "dispatch_fulfill_order",
+        lambda _order_id: (_ for _ in ()).throw(ConnectionError("Redis is unavailable")),
+    )
+
+    response = client.post(
+        "/create-payment-order",
+        headers=headers,
+        json={"user_id": user.id, "address_id": address["id"], "coupon_code": "free5000"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["payment_required"] is False
+    assert payload["amount"] == 0
+    assert payload["discount"] == 2400.0
+    assert payload["total"] == 0.0
+    assert payload["order_number"]
+    assert _get_cart(client)["items"] == []
+
+    order = db_session.query(Order).filter(Order.id == payload["order_id"]).one()
+    payment = db_session.query(Payment).filter(Payment.order_id == order.id).one()
+    db_session.refresh(coupon)
+    db_session.refresh(variant)
+    assert payment.payment_method == PaymentMethod.PROMOTIONAL
+    assert payment.payment_status == PaymentStatus.SUCCESS
+    assert float(payment.amount) == 0.0
+    assert coupon.reserved_count == 0
+    assert coupon.used_count == 1
+    assert variant.stock_quantity == 2
+    assert db_session.query(CouponUsage).filter(CouponUsage.order_id == order.id).count() == 1
 
 
 def test_payment_verification_accepts_raw_razorpay_payload_without_checkout_context(
@@ -370,11 +520,12 @@ def test_verify_payment_returns_existing_order_id_created_by_webhook(
         lambda: _FakeRazorpayClient(),
     )
 
-    client.post(
+    payment_order_response = client.post(
         "/create-payment-order",
         headers=headers,
         json={"user_id": user.id, "address_id": address_id},
     )
+    captured_amount = payment_order_response.json()["data"]["amount"]
 
     webhook_payload = {
         "event": "payment.captured",
@@ -383,7 +534,7 @@ def test_verify_payment_returns_existing_order_id_created_by_webhook(
                 "entity": {
                     "id": "pay_checkout_webhook_123",
                     "order_id": "order_test_checkout_123",
-                    "amount": 141600,
+                    "amount": captured_amount,
                 }
             }
         },
@@ -468,6 +619,71 @@ def test_address_creation_respects_default_switching(client: TestClient, db_sess
     assert len(addresses) == 2
     assert any(address["full_name"] == "Office" and address["is_default"] is True for address in addresses)
     assert any(address["full_name"] == "Home" and address["is_default"] is False for address in addresses)
+
+
+def test_expired_checkout_releases_reserved_stock_exactly_once(db_session: Session):
+    user = _create_user(db_session, "expired-reservation@example.com", "9876543344")
+    variant = _create_product_bundle(db_session, "expired-reservation", stock=0)
+    coupon = Coupon(
+        code="EXPIRES10",
+        discount_type=DiscountType.FIXED,
+        discount_value=10,
+        reserved_count=1,
+        per_user_limit=1,
+        is_active=True,
+    )
+    db_session.add(coupon)
+    db_session.flush()
+    address = Address(
+        user_id=user.id,
+        full_name="Expired Reservation",
+        phone="9876543210",
+        address_line1="Reservation Street",
+        city="Surat",
+        state="Gujarat",
+        pincode="395007",
+        country="India",
+        address_type="home",
+        is_default=True,
+    )
+    db_session.add(address)
+    db_session.flush()
+    intent = CheckoutPaymentIntent(
+        user_id=user.id,
+        address_id=address.id,
+        razorpay_order_id="order_expired_reservation",
+        amount=100,
+        currency="INR",
+        subtotal=100,
+        shipping_amount=0,
+        tax_amount=0,
+        discount_amount=10,
+        total_amount=100,
+        coupon_id=coupon.id,
+        coupon_code=coupon.code,
+        coupon_reserved=True,
+        status=CheckoutPaymentIntentStatus.PENDING,
+        cart_snapshot=json.dumps([{"variant_id": variant.id, "quantity": 1}]),
+        stock_reserved=True,
+        expires_at=datetime.utcnow() - timedelta(minutes=1),
+    )
+    db_session.add(intent)
+    db_session.commit()
+
+    assert expire_checkout_intents(db_session, user_id=user.id) == 1
+    db_session.commit()
+    assert expire_checkout_intents(db_session, user_id=user.id) == 0
+    db_session.commit()
+
+    db_session.refresh(intent)
+    db_session.refresh(variant)
+    db_session.refresh(coupon)
+    assert intent.status == CheckoutPaymentIntentStatus.EXPIRED
+    assert intent.stock_reserved is False
+    assert intent.reservation_released_at is not None
+    assert variant.stock_quantity == 1
+    assert intent.coupon_reserved is False
+    assert coupon.reserved_count == 0
 
 def test_structured_cart_update_and_delete_flow(client: TestClient, db_session: Session):
     user = _create_user(db_session, "root-cart-update@example.com", "9876543333")

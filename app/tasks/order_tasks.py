@@ -8,6 +8,7 @@ from app.db.session import SessionLocal
 from app.models.checkout_payment_intent import CheckoutPaymentIntent, CheckoutPaymentIntentStatus
 from app.models.order import Order
 from app.services.order_service import auto_cancel_pending_orders
+from app.services.checkout_payment_service import expire_checkout_intents
 from app.services.shiprocket import fulfill_order
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,21 @@ def dispatch_fulfill_order(order_id: int) -> None:
             logger.exception("shiprocket_fulfillment_inline_failed order_id=%s", order_id)
         return
     fulfill_order_async.apply_async(args=[order_id], ignore_result=True)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def release_expired_payment_reservations(self):
+    """Expire checkout sessions and atomically return their reserved inventory."""
+    db = SessionLocal()
+    try:
+        released = expire_checkout_intents(db)
+        db.commit()
+        return {"released": released}
+    except Exception as exc:
+        db.rollback()
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)

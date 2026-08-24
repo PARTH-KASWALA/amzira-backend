@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Numeric, ForeignKey, DateTime, Enum, Text
+from sqlalchemy import Column, Integer, String, Numeric, ForeignKey, DateTime, Enum, Index, Text, text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -15,10 +15,19 @@ class PaymentStatus(str, enum.Enum):
 class PaymentMethod(str, enum.Enum):
     RAZORPAY = "razorpay"
     COD = "cod"  # Cash on Delivery
+    PROMOTIONAL = "promotional"
 
 
 class Payment(Base):
     __tablename__ = "payments"
+    __table_args__ = (
+        Index(
+            "uq_payments_razorpay_payment_id_not_null",
+            "razorpay_payment_id",
+            unique=True,
+            postgresql_where=text("razorpay_payment_id IS NOT NULL"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), unique=True, nullable=False)
@@ -38,6 +47,8 @@ class Payment(Base):
     gateway_response = Column(Text, nullable=True)  # Store JSON response
     
     paid_at = Column(DateTime, nullable=True)
+    refunded_amount = Column(Numeric(10, 2), default=0, nullable=False)
+    refunded_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

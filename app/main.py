@@ -26,19 +26,16 @@ from app.core.exceptions import APIError
 from app.core.rate_limiter import limiter
 from app.db.session import SessionLocal, engine, get_db
 from app.models.category import Category
-from app.models.product import Product, Occasion, product_occasions
+from app.models.product import Product
 from app.models.user import User, UserRole
 from app.api.v1 import auth, products, cart, orders, users, payments, admin, reviews, wishlist, coupons, returns, stock, categories, commerce_checkout, webhooks
 from app.services.shiprocket import validate_shiprocket_configuration
 
 API_VERSION = "1.0.0"
 SOFT_LAUNCH_REQUIREMENTS = [
-    {"category_slug": "men", "occasion_slug": "wedding", "min_products": 1},
-    {"category_slug": "men", "occasion_slug": "reception", "min_products": 1},
-    {"category_slug": "men", "occasion_slug": "engagement", "min_products": 1},
-    {"category_slug": "women", "occasion_slug": "wedding", "min_products": 1},
-    {"category_slug": "women", "occasion_slug": "reception", "min_products": 1},
-    {"category_slug": "kids", "occasion_slug": "festive", "min_products": 1},
+    {"category_slug": "girls-lehenga-choli", "min_products": 1},
+    {"category_slug": "pattu-pavadai", "min_products": 1},
+    {"category_slug": "south-indian-kids-ethnic-wear", "min_products": 1},
 ]
 
 
@@ -141,14 +138,17 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 # CORS MIDDLEWARE
 # --------------------------------------------------
 cors_origins: list[str] = []
-for origin in [
-    *settings.BACKEND_CORS_ORIGINS,
-    settings.FRONTEND_URL,
-    "http://127.0.0.1:5500",
-    "http://localhost:5500",
-    "http://127.0.0.1:3000",
-    "http://localhost:3000",
-]:
+configured_origins = [*settings.BACKEND_CORS_ORIGINS, settings.FRONTEND_URL]
+if settings.ENVIRONMENT != "production":
+    configured_origins.extend(
+        [
+            "http://127.0.0.1:5500",
+            "http://localhost:5500",
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+        ]
+    )
+for origin in configured_origins:
     normalized_origin = (origin or "").strip().rstrip("/")
     if not normalized_origin:
         continue
@@ -315,7 +315,16 @@ app.include_router(coupons.router, prefix=f"{settings.API_V1_STR}/coupons", tags
 app.include_router(returns.router, prefix=f"{settings.API_V1_STR}/returns", tags=["Returns"])
 app.include_router(stock.router, prefix=f"{settings.API_V1_STR}/stock", tags=["Stock"])
 app.include_router(webhooks.router, prefix=settings.API_V1_STR, tags=["Webhooks"])
-app.include_router(commerce_checkout.router, tags=["Commerce Checkout"])
+app.include_router(
+    commerce_checkout.router,
+    tags=["Commerce Checkout (legacy)"],
+    deprecated=True,
+)
+app.include_router(
+    commerce_checkout.router,
+    prefix=settings.API_V1_STR,
+    tags=["Commerce Checkout"],
+)
 
 # --------------------------------------------------
 # HEALTH CHECK ENDPOINT
@@ -408,24 +417,22 @@ def database_health_check():
 
 @app.get("/health/catalog-launch")
 def catalog_launch_health_check(db: Session = Depends(get_db)):
-    """Validate soft-launch catalog coverage for MEN/WOMEN/KIDS occasions."""
+    """Validate the kids-girls launch assortment without requiring future categories."""
     try:
         counts = {
-            (category_slug, occasion_slug): product_count
-            for category_slug, occasion_slug, product_count in (
+            category_slug: product_count
+            for category_slug, product_count in (
                 db.query(
                     Category.slug.label("category_slug"),
-                    Occasion.slug.label("occasion_slug"),
                     func.count(Product.id).label("product_count"),
                 )
                 .join(Product, Product.category_id == Category.id)
-                .join(product_occasions, product_occasions.c.product_id == Product.id)
-                .join(Occasion, Occasion.id == product_occasions.c.occasion_id)
                 .filter(
                     Product.is_active == True,
                     Category.is_active == True,
+                    Product.audience == "kids_girls",
                 )
-                .group_by(Category.slug, Occasion.slug)
+                .group_by(Category.slug)
                 .all()
             )
         }
@@ -433,11 +440,9 @@ def catalog_launch_health_check(db: Session = Depends(get_db)):
         missing = []
         coverage = []
         for req in SOFT_LAUNCH_REQUIREMENTS:
-            key = (req["category_slug"], req["occasion_slug"])
-            found = int(counts.get(key, 0))
+            found = int(counts.get(req["category_slug"], 0))
             entry = {
                 "category": req["category_slug"],
-                "occasion": req["occasion_slug"],
                 "required_minimum": req["min_products"],
                 "active_products": found,
                 "ready": found >= req["min_products"],
@@ -545,11 +550,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 from app.middleware.csrf import verify_csrf_token
 
 CSRF_EXEMPT_PATHS = {
-    "/verify-payment",
     "/api/v1/auth/login",
     "/api/v1/auth/register",
-    "/api/v1/auth/refresh",
-    "/api/v1/auth/logout",
+    "/api/v1/auth/forgot-password",
+    "/api/v1/auth/reset-password",
     "/api/v1/webhooks/razorpay",
     "/api/v1/shiprocket/webhook",
 }

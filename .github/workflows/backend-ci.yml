@@ -1,0 +1,50 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: amzira_test
+          POSTGRES_USER: amzira
+          POSTGRES_PASSWORD: amzira_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U amzira -d amzira_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://amzira:amzira_test_password@127.0.0.1:5432/amzira_test
+      SECRET_KEY: ci-only-secret-key-that-is-long-enough
+      RAZORPAY_KEY_ID: rzp_test_ci
+      RAZORPAY_KEY_SECRET: ci-secret
+      RAZORPAY_WEBHOOK_SECRET: ci-webhook-secret
+      ENVIRONMENT: development
+      TESTING: "true"
+      CELERY_TASK_ALWAYS_EAGER: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Verify dependency resolution
+        run: pip check
+      - name: Apply PostgreSQL migrations
+        run: alembic upgrade head
+      - name: Run tests
+        run: pytest -q
+      - name: Verify migration head
+        run: test "$(alembic heads | awk '{print $1}')" = "$(alembic current | awk '{print $1}')"

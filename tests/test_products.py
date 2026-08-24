@@ -226,3 +226,43 @@ def test_product_list_supports_server_side_variant_and_fabric_filters(client: Te
     products = response.json()["data"]["products"]
     assert len(products) == 1
     assert products[0]["slug"] == "red-silk-kurti"
+
+
+def test_product_list_parent_category_includes_child_products(client: TestClient, db_session: Session):
+    parent = Category(name="Kids", slug="kids", is_active=True)
+    db_session.add(parent)
+    db_session.flush()
+    child = Category(
+        name="Girls Lehenga Choli",
+        slug="girls-lehenga-choli",
+        parent_id=parent.id,
+        is_active=True,
+    )
+    unrelated = Category(name="Women", slug="women", is_active=True)
+    db_session.add_all([child, unrelated])
+    db_session.flush()
+    db_session.add_all(
+        [
+            Product(
+                category_id=child.id,
+                name="Kids Pattu Pavadai",
+                slug="kids-pattu-pavadai",
+                base_price=1500.0,
+                is_active=True,
+            ),
+            Product(
+                category_id=unrelated.id,
+                name="Women Kurta",
+                slug="women-kurta",
+                base_price=1800.0,
+                is_active=True,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    response = client.get("/api/v1/products?category=kids")
+
+    assert response.status_code == 200
+    products = response.json()["data"]["products"]
+    assert [product["slug"] for product in products] == ["kids-pattu-pavadai"]

@@ -6,6 +6,7 @@ import structlog
 
 from app.models.coupon import Coupon, DiscountType
 from app.models.coupon_usage import CouponUsage
+from app.models.checkout_payment_intent import CheckoutPaymentIntent, CheckoutPaymentIntentStatus
 from app.models.order import Order, OrderStatus
 from app.schemas.coupon import CouponCreate, CouponUpdate, CouponResponse, ApplyCouponResponse
 
@@ -148,7 +149,7 @@ class CouponService:
             )
         
         # Check global usage limit
-        if coupon.usage_limit and coupon.used_count >= coupon.usage_limit:
+        if coupon.usage_limit and (coupon.used_count + coupon.reserved_count) >= coupon.usage_limit:
             return ApplyCouponResponse(
                 valid=False,
                 discount_amount=0.0,
@@ -160,8 +161,14 @@ class CouponService:
         user_usage_count = db.query(func.count(CouponUsage.id)).filter(
             and_(CouponUsage.coupon_id == coupon.id, CouponUsage.user_id == user_id)
         ).scalar()
-        
-        if user_usage_count >= coupon.per_user_limit:
+        user_reservation_count = db.query(func.count(CheckoutPaymentIntent.id)).filter(
+            CheckoutPaymentIntent.coupon_id == coupon.id,
+            CheckoutPaymentIntent.user_id == user_id,
+            CheckoutPaymentIntent.coupon_reserved == True,
+            CheckoutPaymentIntent.status == CheckoutPaymentIntentStatus.PENDING,
+        ).scalar() or 0
+
+        if (user_usage_count or 0) + user_reservation_count >= coupon.per_user_limit:
             return ApplyCouponResponse(
                 valid=False,
                 discount_amount=0.0,

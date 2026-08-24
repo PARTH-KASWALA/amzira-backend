@@ -24,6 +24,9 @@ celerybeat-schedule*
 # Uploads
 static/uploads/*
 !static/uploads/.gitkeep
+build/catalog-media/
+build/catalog-launch-*-local.csv
+build/catalog-launch-*-local.json
 
 # IDEs
 .vscode/

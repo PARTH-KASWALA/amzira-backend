@@ -240,3 +240,130 @@ def test_admin_bulk_upload_supports_xlsx(client: TestClient, db_session: Session
     assert product is not None
     assert len(product.variants) == 2
 
+
+def _catalog_product_payload(slug: str = "ruby-pattu-pavadai") -> dict:
+    return {
+        "name": "Ruby Pattu Pavadai",
+        "slug": slug,
+        "category_slug": "pattu-pavadai",
+        "base_price": "3499.00",
+        "sale_price": "3199.00",
+        "audience": "kids_girls",
+        "occasion_slugs": ["festive"],
+        "images": [
+            {
+                "image_url": "https://cdn.amzira.test/ruby-front.jpg",
+                "is_primary": True,
+            }
+        ],
+        "external_source": "myntra",
+        "external_id": "STYLE-001",
+        "style_code": "ETHZY-001",
+        "variants": [
+            {"sku": "AMZ-RUBY-24", "size": "24", "color": "Ruby", "stock_quantity": 4},
+            {"sku": "AMZ-RUBY-26", "size": "26", "color": "Ruby", "stock_quantity": 3},
+        ],
+    }
+
+
+def _create_catalog_dependencies(db: Session) -> None:
+    kids = Category(name="Kids", slug="kids", is_active=True)
+    db.add(kids)
+    db.flush()
+    db.add_all(
+        [
+            Category(
+                name="Pattu Pavadai",
+                slug="pattu-pavadai",
+                parent_id=kids.id,
+                is_active=True,
+            ),
+            Occasion(name="Festive", slug="festive"),
+        ]
+    )
+    db.commit()
+
+
+def test_catalog_import_dry_run_validates_without_writes(client: TestClient, db_session: Session):
+    admin = _create_admin(db_session, email="catalog-dry-run@example.com")
+    _create_catalog_dependencies(db_session)
+    _login(client, admin.email)
+
+    response = client.post(
+        "/api/v1/admin/products/catalog-import/json",
+        headers=_csrf_headers(client),
+        json={"products": [_catalog_product_payload()], "dry_run": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["dry_run"] is True
+    assert db_session.query(Product).filter(Product.slug == "ruby-pattu-pavadai").first() is None
+
+
+def test_catalog_import_creates_exact_variants_atomically(client: TestClient, db_session: Session):
+    admin = _create_admin(db_session, email="catalog-create@example.com")
+    _create_catalog_dependencies(db_session)
+    _login(client, admin.email)
+
+    response = client.post(
+        "/api/v1/admin/products/catalog-import/json",
+        headers=_csrf_headers(client),
+        json={"products": [_catalog_product_payload()]},
+    )
+
+    assert response.status_code == 200
+    report = response.json()["data"]
+    assert report["products_created"] == 1
+    assert report["variants_created"] == 2
+    product = db_session.query(Product).filter(Product.slug == "ruby-pattu-pavadai").one()
+    assert {variant.sku for variant in product.variants} == {"AMZ-RUBY-24", "AMZ-RUBY-26"}
+    assert product.external_id == "STYLE-001"
+
+
+def test_catalog_import_rejects_whole_batch_for_duplicate_sku(client: TestClient, db_session: Session):
+    admin = _create_admin(db_session, email="catalog-duplicate@example.com")
+    _create_catalog_dependencies(db_session)
+    _login(client, admin.email)
+    first = _catalog_product_payload()
+    second = _catalog_product_payload("emerald-pattu-pavadai")
+    second["external_id"] = "STYLE-002"
+    second["variants"] = [{"sku": "AMZ-RUBY-24", "size": "28", "stock_quantity": 2}]
+
+    response = client.post(
+        "/api/v1/admin/products/catalog-import/json",
+        headers=_csrf_headers(client),
+        json={"products": [first, second]},
+    )
+
+    assert response.status_code == 422
+    assert db_session.query(Product).count() == 0
+
+
+def test_catalog_upsert_updates_stock_and_deactivates_omitted_skus(client: TestClient, db_session: Session):
+    admin = _create_admin(db_session, email="catalog-upsert@example.com")
+    _create_catalog_dependencies(db_session)
+    _login(client, admin.email)
+    headers = _csrf_headers(client)
+    payload = _catalog_product_payload()
+    create_response = client.post(
+        "/api/v1/admin/products/catalog-import/json",
+        headers=headers,
+        json={"products": [payload]},
+    )
+    assert create_response.status_code == 200
+
+    payload["base_price"] = "3599.00"
+    payload["variants"] = [{"sku": "AMZ-RUBY-24", "size": "24", "color": "Ruby", "stock_quantity": 11}]
+    update_response = client.post(
+        "/api/v1/admin/products/catalog-import/json",
+        headers=headers,
+        json={"products": [payload], "mode": "upsert"},
+    )
+
+    assert update_response.status_code == 200
+    product = db_session.query(Product).filter(Product.slug == "ruby-pattu-pavadai").one()
+    variants = {variant.sku: variant for variant in product.variants}
+    assert float(product.base_price) == 3599.0
+    assert variants["AMZ-RUBY-24"].stock_quantity == 11
+    assert variants["AMZ-RUBY-26"].stock_quantity == 0
+    assert variants["AMZ-RUBY-26"].is_active is False

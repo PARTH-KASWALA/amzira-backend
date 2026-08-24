@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -16,8 +16,32 @@ from app.models.payment import Payment, PaymentMethod, PaymentStatus
 from app.models.product import Product, ProductVariant
 from app.models.return_request import ReturnRequest, ReturnStatus
 from app.models.user import User, UserRole
-from app.services import shiprocket
-from app.services.return_service import utc_now
+from app.services import payment_service, shiprocket
+from app.services.return_service import (
+    build_return_eligibility_payload,
+    mark_order_delivered,
+    utc_now,
+)
+
+
+class _FakeRefundResource:
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def refund(self, payment_id: str, payload: dict) -> dict:
+        self.calls.append((payment_id, payload))
+        return {
+            "id": "rfnd_amzira_test_123",
+            "payment_id": payment_id,
+            "amount": payload["amount"],
+            "status": "pending",
+            "receipt": payload["receipt"],
+        }
+
+
+class _FakeRefundClient:
+    def __init__(self):
+        self.payment = _FakeRefundResource()
 
 
 def _csrf_headers(client: TestClient) -> dict:
@@ -156,6 +180,33 @@ def test_return_eligibility_uses_server_time(client: TestClient, db_session: Ses
     assert payload["return_deadline"].endswith("Z")
 
 
+def test_return_window_is_exactly_36_hours_and_includes_deadline():
+    delivered_at = datetime(2026, 8, 17, 6, 0, tzinfo=timezone.utc)
+    order = Order(status=OrderStatus.OUT_FOR_DELIVERY)
+
+    mark_order_delivered(order, delivered_at)
+
+    assert order.return_deadline == delivered_at + timedelta(hours=36)
+    at_deadline = build_return_eligibility_payload(order, order.return_deadline)
+    assert at_deadline["eligible"] is True
+    assert at_deadline["ms_remaining"] == 0
+
+
+def test_return_window_expires_immediately_after_36_hours():
+    delivered_at = datetime(2026, 8, 17, 6, 0, tzinfo=timezone.utc)
+    order = Order(status=OrderStatus.OUT_FOR_DELIVERY)
+    mark_order_delivered(order, delivered_at)
+
+    expired = build_return_eligibility_payload(
+        order,
+        order.return_deadline + timedelta(microseconds=1),
+    )
+
+    assert expired["eligible"] is False
+    assert expired["return_status"] == "expired"
+    assert expired["ms_remaining"] == 0
+
+
 def test_create_return_request_sets_user_id_and_blocks_duplicates(client: TestClient, db_session: Session):
     user = _create_user(db_session, "return-request@example.com", "9876543402")
     variant = _create_variant(db_session, "request")
@@ -238,7 +289,7 @@ def test_authenticated_order_detail_by_order_number(client: TestClient, db_sessi
     assert payload["order"]["timeline"][0]["status"] == "PLACED"
 
 
-def test_public_tracking_endpoint_returns_tracking_payload(client: TestClient, db_session: Session):
+def test_tracking_endpoint_requires_owner_and_returns_safe_payload(client: TestClient, db_session: Session):
     user = _create_user(db_session, "public-tracking-endpoint@example.com", "9876543492")
     variant = _create_variant(db_session, "publictrackingendpoint")
     order = _create_delivered_order(db_session, user.id, variant, "PUBTRACK2")
@@ -247,6 +298,10 @@ def test_public_tracking_endpoint_returns_tracking_payload(client: TestClient, d
     order.current_location = "Surat Hub"
     db_session.commit()
 
+    anonymous_response = client.get(f"/api/v1/orders/{order.order_number}/tracking")
+    assert anonymous_response.status_code == 401
+
+    _login(client, user.email)
     response = client.get(f"/api/v1/orders/{order.order_number}/tracking")
 
     assert response.status_code == 200
@@ -255,6 +310,9 @@ def test_public_tracking_endpoint_returns_tracking_payload(client: TestClient, d
     assert payload["data"]["awb_code"] == "AWB123456"
     assert payload["data"]["location"] == "Surat Hub"
     assert payload["order"]["order_number"] == order.order_number
+    assert "shipping_address" not in payload["order"]
+    assert "items" not in payload["order"]
+    assert "order_id" not in payload["order"]
 
 
 def test_order_level_return_endpoint_marks_tracking_status(client: TestClient, db_session: Session):
@@ -334,6 +392,133 @@ def test_new_webhook_endpoint_confirms_payment(client: TestClient, db_session: S
     assert payment.payment_status == PaymentStatus.SUCCESS
     assert order.status == OrderStatus.CONFIRMED
 
+    failed_payload = {
+        "event": "payment.failed",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_failed_attempt",
+                    "order_id": "rzp_order_new_webhook",
+                    "amount": 117882,
+                }
+            }
+        },
+    }
+    failed_body = json.dumps(failed_payload).encode()
+    failed_signature = hmac.new(
+        settings.RAZORPAY_WEBHOOK_SECRET.encode(),
+        failed_body,
+        hashlib.sha256,
+    ).hexdigest()
+    failed_response = client.post(
+        "/api/v1/webhooks/razorpay",
+        headers={
+            "X-Razorpay-Signature": failed_signature,
+            "Content-Type": "application/json",
+        },
+        content=failed_body,
+    )
+
+    assert failed_response.status_code == 200
+    db_session.refresh(payment)
+    db_session.refresh(order)
+    assert payment.payment_status == PaymentStatus.SUCCESS
+    assert order.status == OrderStatus.CONFIRMED
+
+
+def test_refund_calls_razorpay_once_and_waits_for_processed_webhook(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    customer = _create_user(db_session, "refund-customer@example.com", "9876543421")
+    admin = _create_user(
+        db_session,
+        "refund-admin@example.com",
+        "9876543422",
+        role=UserRole.ADMIN,
+    )
+    variant = _create_variant(db_session, "refund-lifecycle", stock=2)
+    order = _create_delivered_order(db_session, customer.id, variant, "REFUND-LIFECYCLE")
+    payment = Payment(
+        order_id=order.id,
+        payment_method=PaymentMethod.RAZORPAY,
+        payment_status=PaymentStatus.SUCCESS,
+        amount=order.total_amount,
+        currency="INR",
+        razorpay_order_id="order_refund_lifecycle",
+        razorpay_payment_id="pay_refund_lifecycle",
+    )
+    return_request = ReturnRequest(
+        order_id=order.id,
+        order_item_id=order.items[0].id,
+        user_id=customer.id,
+        reason="other",
+        description="Refund lifecycle test",
+        refund_amount=order.items[0].total_price,
+        refund_method="original_payment",
+        status=ReturnStatus.PICKED_UP,
+    )
+    db_session.add_all([payment, return_request])
+    db_session.commit()
+
+    fake_client = _FakeRefundClient()
+    monkeypatch.setattr(payment_service, "get_razorpay_client", lambda: fake_client)
+    _login(client, admin.email)
+    headers = _csrf_headers(client)
+
+    initial_stock = variant.stock_quantity
+    first = client.put(f"/api/v1/returns/{return_request.id}/refund", headers=headers)
+    second = client.put(f"/api/v1/returns/{return_request.id}/refund", headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(fake_client.payment.calls) == 1
+    payment_id, refund_payload = fake_client.payment.calls[0]
+    assert payment_id == "pay_refund_lifecycle"
+    assert refund_payload["receipt"] == f"amzira-return-{return_request.id}"
+    db_session.refresh(return_request)
+    db_session.refresh(variant)
+    assert return_request.status == ReturnStatus.REFUND_PENDING
+    assert return_request.refund_transaction_id == "rfnd_amzira_test_123"
+    assert variant.stock_quantity == initial_stock + 1
+
+    webhook_payload = {
+        "event": "refund.processed",
+        "payload": {
+            "refund": {
+                "entity": {
+                    "id": "rfnd_amzira_test_123",
+                    "payment_id": "pay_refund_lifecycle",
+                    "amount": 99900,
+                    "status": "processed",
+                }
+            }
+        },
+    }
+    raw_body = json.dumps(webhook_payload).encode()
+    signature = hmac.new(
+        settings.RAZORPAY_WEBHOOK_SECRET.encode(),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    webhook_response = client.post(
+        "/api/v1/webhooks/razorpay",
+        headers={"X-Razorpay-Signature": signature, "Content-Type": "application/json"},
+        content=raw_body,
+    )
+
+    assert webhook_response.status_code == 200
+    db_session.refresh(return_request)
+    db_session.refresh(payment)
+    db_session.refresh(order)
+    db_session.refresh(variant)
+    assert return_request.status == ReturnStatus.REFUNDED
+    assert payment.refunded_amount == 999
+    assert payment.payment_status == PaymentStatus.SUCCESS
+    assert order.status == OrderStatus.RETURNED
+    assert variant.stock_quantity == initial_stock + 1
+
 
 def test_delivered_order_cannot_move_back_to_processing(client: TestClient, db_session: Session):
     user = _create_user(db_session, "order-transition-user@example.com", "9876543405")
@@ -401,6 +586,22 @@ def test_shiprocket_webhook_updates_forward_delivery_status(client: TestClient, 
     assert order.courier_name == "Shiprocket Express"
     assert order.tracking_url == "https://tracking.example.com/fwd"
     assert order.current_location == "Surat Hub"
+
+
+def test_shiprocket_webhook_fails_closed_without_secret(client: TestClient):
+    original_secret = settings.SHIPROCKET_WEBHOOK_SECRET
+    settings.SHIPROCKET_WEBHOOK_SECRET = ""
+    try:
+        response = client.post(
+            "/api/v1/shiprocket/webhook",
+            headers={"Content-Type": "application/json"},
+            content=json.dumps({"shipment_id": "unknown", "status": "delivered"}).encode(),
+        )
+    finally:
+        settings.SHIPROCKET_WEBHOOK_SECRET = original_secret
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "Shiprocket webhook secret is not configured"
 
 
 def test_shiprocket_webhook_updates_return_request_status(client: TestClient, db_session: Session):

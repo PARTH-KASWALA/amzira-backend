@@ -5,7 +5,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from app.db.session import get_db
-from app.api.deps import get_current_active_user, get_current_user_optional, require_admin
+from app.api.deps import get_current_active_user, require_admin
 from app.models.user import User
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.payment import Payment, PaymentMethod, PaymentStatus
@@ -143,6 +143,7 @@ def _serialize_order(order: Order) -> dict:
         "shipping_charge": order.shipping_charge,
         "discount": order.discount_amount,
         "discount_amount": order.discount_amount,
+        "coupon_code": order.coupon_code,
         "total": order.total_amount,
         "grand_total": order.total_amount,
         "total_amount": order.total_amount,
@@ -191,7 +192,6 @@ def _build_tracking_payload(order: Order, live_tracking=None) -> dict:
     timeline = build_status_timeline(order.status)
 
     return {
-        "order_id": order.id,
         "order_number": order.order_number,
         "status": public_status,
         "payment_status": (
@@ -214,7 +214,6 @@ def _build_tracking_payload(order: Order, live_tracking=None) -> dict:
             "timeline": timeline,
         },
         "timeline": timeline,
-        "live": live_tracking.raw_response if live_tracking else None,
     }
 
 
@@ -548,8 +547,10 @@ def get_order_detail(
             content=_tracking_failed(str(exc.detail)),
         )
     except Exception as exc:
+        db.rollback()
+        logger.exception("order_detail_failed", extra={"order_reference": order_reference})
         return JSONResponse(
-            status_code=status.HTTP_200_OK,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content=_tracking_failed("Failed to retrieve order"),
         )
 
@@ -768,19 +769,18 @@ def get_return_eligibility(
 def get_order_tracking(
     request: Request,
     order_reference: str,
-    current_user: Optional[User] = Depends(get_current_user_optional),
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Get order tracking information."""
+    """Get tracking information for an order owned by the authenticated user."""
     order = _resolve_order_reference(
         db=db,
         order_reference=order_reference,
         current_user=current_user,
-        allow_public_numeric=True,
     )
     if not order:
         return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=_tracking_failed("Order not found"))
-    if current_user is not None and not _can_access_order(order, current_user):
+    if not _can_access_order(order, current_user):
         return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=_tracking_failed("Order not found"))
 
     live_tracking = None
@@ -799,7 +799,7 @@ def get_order_tracking(
         "status": "success",
         "message": "Order tracking retrieved",
         "data": payload,
-        "order": _serialize_order(order),
+        "order": payload,
     }
 
 

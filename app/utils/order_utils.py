@@ -1,4 +1,4 @@
-import random
+import secrets
 import string
 
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ def generate_order_number(db: Session) -> str:
 
     for _ in range(max_attempts):
         candidate = "AMZ-" + "".join(
-            random.choices(string.ascii_uppercase + string.digits, k=8)
+            secrets.choice(string.ascii_uppercase + string.digits) for _ in range(12)
         )
         existing = db.query(Order.id).filter(Order.order_number == candidate).first()
         if not existing:

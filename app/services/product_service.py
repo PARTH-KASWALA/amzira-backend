@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
@@ -16,6 +17,16 @@ from app.models.product import Occasion, Product, ProductVariant
 PRODUCT_COUNT_CACHE_TTL_SECONDS = 60
 PRODUCT_LIST_CACHE_TTL_SECONDS = 60
 PRODUCT_DETAIL_CACHE_TTL_SECONDS = 120
+
+
+def _deserialize_tags(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except (TypeError, ValueError):
+        return []
 
 
 def build_products_count_cache_key(request: Request) -> str:
@@ -37,6 +48,23 @@ def _split_filter_values(value) -> list[str]:
     else:
         raw_values = str(value).split(",")
     return [str(entry).strip() for entry in raw_values if str(entry).strip()]
+
+
+def _category_ids_with_descendants(db: Session, slugs: list[str]) -> list[int]:
+    selected_ids = {
+        category_id
+        for (category_id,) in db.query(Category.id).filter(Category.slug.in_(slugs)).all()
+    }
+    all_ids = set(selected_ids)
+    frontier = selected_ids
+    while frontier:
+        child_ids = {
+            category_id
+            for (category_id,) in db.query(Category.id).filter(Category.parent_id.in_(frontier)).all()
+        } - all_ids
+        all_ids.update(child_ids)
+        frontier = child_ids
+    return list(all_ids)
 
 
 def _apply_search_filter(query, search: str, db: Session):
@@ -106,9 +134,8 @@ def build_products_query(
     elif category:
         categories = _split_filter_values(category)
         if categories:
-            cat_ids = [cat.id for cat in db.query(Category).filter(Category.slug.in_(categories)).all()]
-            if cat_ids:
-                query = query.filter(Product.category_id.in_(cat_ids))
+            cat_ids = _category_ids_with_descendants(db, categories)
+            query = query.filter(Product.category_id.in_(cat_ids))
 
     if subcategory_id:
         query = query.filter(Product.subcategory_id == subcategory_id)
@@ -227,6 +254,10 @@ def serialize_product_summary(product: Product) -> dict:
         "sale_price": product.sale_price,
         "discount_percentage": product.discount_percentage,
         "is_featured": product.is_featured,
+        "is_bestseller": product.is_bestseller,
+        "is_new_arrival": product.is_new_arrival,
+        "collection": product.collection,
+        "tags": _deserialize_tags(product.tags),
         "stock_quantity": stock_quantity,
         "default_variant": default_variant,
         "category": {
@@ -311,6 +342,10 @@ def get_product_detail(db: Session, *, slug: str) -> dict:
         "sale_price": product.sale_price,
         "discount_percentage": product.discount_percentage,
         "is_featured": product.is_featured,
+        "is_bestseller": product.is_bestseller,
+        "is_new_arrival": product.is_new_arrival,
+        "collection": product.collection,
+        "tags": _deserialize_tags(product.tags),
         "total_stock": product.total_stock,
         "avg_rating": product.avg_rating,
         "review_count": product.review_count,

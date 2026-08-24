@@ -1,4 +1,10 @@
-version: '3.8'
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql://amzira_user:${DB_PASSWORD:?DB_PASSWORD is required}@db:5432/amzira_db
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+  ENVIRONMENT: production
+  DEBUG: "False"
 
 services:
   db:
@@ -18,27 +24,74 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    env_file: .env
+    environment: *app-environment
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
   backend:
     build: .
     ports:
       - "8000:8000"
-    environment:
-      DATABASE_URL: postgresql://amzira_user:${DB_PASSWORD}@db:5432/amzira_db
-      SECRET_KEY: ${SECRET_KEY}
-      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
-      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
-      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET}
-      ENVIRONMENT: ${ENVIRONMENT:-production}
-      DEBUG: ${DEBUG:-False}
-    volumes:
-      - ./static:/app/static
+    env_file: .env
+    environment: *app-environment
     depends_on:
-      db:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health',headers={'X-Health-Token':os.environ['HEALTHCHECK_TOKEN']}); raise SystemExit(0 if urllib.request.urlopen(r,timeout=3).status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build: .
+    env_file: .env
+    environment: *app-environment
+    command: ["celery", "-A", "app.core.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=celery,emails", "--concurrency=2"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  beat:
+    build: .
+    env_file: .env
+    environment: *app-environment
+    command: ["celery", "-A", "app.core.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:
 # ```
 
 # ### **.dockerignore**

@@ -103,8 +103,8 @@ def validate_shiprocket_configuration(*, strict: bool = False) -> bool:
 def verify_shiprocket_webhook_signature(body: bytes, signature: str | None) -> None:
     secret = (settings.SHIPROCKET_WEBHOOK_SECRET or "").strip()
     if not secret:
-        logger.warning("shiprocket_webhook_secret_missing")
-        return
+        logger.error("shiprocket_webhook_secret_missing")
+        raise ShiprocketAPIError("Shiprocket webhook secret is not configured")
     if not signature:
         raise ShiprocketAPIError("Missing Shiprocket webhook signature")
 

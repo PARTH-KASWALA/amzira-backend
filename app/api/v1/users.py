@@ -12,10 +12,14 @@ from app.utils.response import success
 router = APIRouter()
 
 
+def _serialize_user(user: User) -> dict:
+    return UserResponse.model_validate(user).model_dump(mode="json")
+
+
 @router.get("/me", response_model=dict)
 def get_current_user_profile(current_user: User = Depends(get_current_active_user)):
     """Get current user profile"""
-    return success(data=current_user, message="User profile retrieved")
+    return success(data=_serialize_user(current_user), message="User profile retrieved")
 
 
 @router.put("/me", response_model=dict)
@@ -46,7 +50,7 @@ def update_user_profile(
     db.commit()
     db.refresh(current_user)
     
-    return success(data=current_user, message="User profile updated")
+    return success(data=_serialize_user(current_user), message="User profile updated")
 
 
 # ============= ADDRESSES =============

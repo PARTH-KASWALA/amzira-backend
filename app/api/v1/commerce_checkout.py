@@ -27,9 +27,15 @@ from app.schemas.commerce_checkout import (
     VerifyPaymentRequest,
 )
 from app.services.checkout_payment_service import (
+    build_cart_fingerprint,
     build_checkout_payment_response,
     create_order_from_checkout_intent,
+    expire_checkout_intents,
     get_payment_mapped_order,
+    quote_checkout_coupon,
+    release_checkout_stock,
+    reserve_checkout_coupon,
+    reserve_checkout_stock,
     sync_intent_success,
 )
 from app.services.payment_service import get_razorpay_client, verify_payment_signature
@@ -37,10 +43,18 @@ from app.services.shiprocket import check_pincode_serviceability, validate_shipr
 from app.tasks.order_tasks import dispatch_fulfill_order
 from app.core.pricing import calculate_shipping, calculate_tax, money, money_float
 from app.utils.response import success
+from app.core.rate_limiter import limiter
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _dispatch_fulfillment_safely(order_id: int) -> None:
+    try:
+        dispatch_fulfill_order(order_id)
+    except Exception:
+        logger.exception("order_fulfillment_dispatch_failed order_id=%s", order_id)
 
 
 def _get_user_or_404(db: Session, user_id: int) -> User:
@@ -199,21 +213,147 @@ def validate_checkout(
 
 
 @router.post("/create-payment-order")
+@limiter.limit("5/10 minutes")
 def create_payment_order(
+    request: Request,
     payload: CreatePaymentOrderRequest,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
     _ensure_user_owns_resource(current_user, payload.user_id)
-    _get_user_or_404(db, payload.user_id)
-    user = _get_user_or_404(db, payload.user_id)
+    user = (
+        db.query(User)
+        .filter(User.id == payload.user_id, User.is_active == True)
+        .with_for_update()
+        .first()
+    )
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     address = _get_address_or_404(db, payload.user_id, payload.address_id)
     _validate_serviceability_if_configured(address, cod=False)
     cart_items = _get_cart_items_or_400(db, payload.user_id)
     snapshot = _build_checkout_snapshot(cart_items)
-    _lock_variants_for_snapshot(db, snapshot["items"])
+    fingerprint = build_cart_fingerprint(
+        user_id=payload.user_id,
+        address_id=address.id,
+        items=snapshot["items"],
+        coupon_code=payload.coupon_code,
+    )
+    expire_checkout_intents(db, user_id=payload.user_id)
+    active_intent = (
+        db.query(CheckoutPaymentIntent)
+        .filter(
+            CheckoutPaymentIntent.user_id == payload.user_id,
+            CheckoutPaymentIntent.status == CheckoutPaymentIntentStatus.PENDING,
+            CheckoutPaymentIntent.expires_at > datetime.utcnow(),
+        )
+        .with_for_update()
+        .first()
+    )
+    if active_intent:
+        if active_intent.cart_fingerprint != fingerprint:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Another checkout is already in progress for this account",
+            )
+        return success(
+            data={
+                "razorpay_order_id": active_intent.razorpay_order_id,
+                "razorpay_key_id": settings.RAZORPAY_KEY_ID,
+                "payment_required": True,
+                "amount": int(money(active_intent.total_amount) * 100),
+                "currency": active_intent.currency,
+                "subtotal": float(active_intent.subtotal),
+                "discount": float(active_intent.discount_amount),
+                "coupon_code": active_intent.coupon_code,
+                "tax": float(active_intent.tax_amount),
+                "total": float(active_intent.total_amount),
+            },
+            message="Existing payment order retrieved",
+        )
 
-    amount_paise = int(round(snapshot["total"] * 100))
+    coupon = None
+    discount = money(0)
+    if payload.coupon_code:
+        coupon, discount = quote_checkout_coupon(
+            db,
+            user_id=payload.user_id,
+            coupon_code=payload.coupon_code,
+            subtotal=money(snapshot["subtotal"]),
+        )
+        discounted_subtotal = max(money(0), money(snapshot["subtotal"]) - discount)
+        tax = calculate_tax(discounted_subtotal + money(snapshot["shipping"]))
+        total = money(discounted_subtotal + money(snapshot["shipping"]) + tax)
+        snapshot["discount"] = money_float(discount)
+        snapshot["tax"] = money_float(tax)
+        snapshot["total"] = money_float(total)
+    else:
+        snapshot["discount"] = 0.0
+
+    amount_paise = int(money(snapshot["total"]) * 100)
+    if amount_paise == 0:
+        internal_order_id = f"promo_order_{uuid4().hex}"
+        internal_payment_id = f"promo_payment_{uuid4().hex}"
+        try:
+            intent = CheckoutPaymentIntent(
+                user_id=payload.user_id,
+                address_id=address.id,
+                razorpay_order_id=internal_order_id,
+                amount=money(0),
+                currency="INR",
+                subtotal=snapshot["subtotal"],
+                shipping_amount=snapshot["shipping"],
+                tax_amount=snapshot["tax"],
+                discount_amount=snapshot["discount"],
+                total_amount=snapshot["total"],
+                status=CheckoutPaymentIntentStatus.PENDING,
+                cart_snapshot=json.dumps(snapshot["items"]),
+                cart_fingerprint=fingerprint,
+                expires_at=datetime.utcnow() + timedelta(minutes=30),
+            )
+            db.add(intent)
+            db.flush()
+            reserve_checkout_coupon(intent, coupon)
+            reserve_checkout_stock(db, intent)
+            order = create_order_from_checkout_intent(
+                db,
+                intent=intent,
+                razorpay_payment_id=internal_payment_id,
+                razorpay_signature=None,
+                payment_method=PaymentMethod.PROMOTIONAL,
+            )
+            db.commit()
+            db.refresh(order)
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            logger.exception("fully_discounted_checkout_failed user_id=%s address_id=%s", payload.user_id, address.id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unable to complete the fully discounted order",
+            )
+
+        _dispatch_fulfillment_safely(order.id)
+        return success(
+            data={
+                "payment_required": False,
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "amount": 0,
+                "currency": "INR",
+                "subtotal": snapshot["subtotal"],
+                "shipping": snapshot["shipping"],
+                "discount": snapshot["discount"],
+                "coupon_code": payload.coupon_code,
+                "tax": snapshot["tax"],
+                "total": snapshot["total"],
+            },
+            message="Fully discounted order created",
+        )
+
     try:
         razorpay_client = get_razorpay_client()
         logger.info(
@@ -243,13 +383,19 @@ def create_payment_order(
             amount=round(snapshot["total"], 2),
             currency="INR",
             subtotal=snapshot["subtotal"],
+            shipping_amount=snapshot["shipping"],
             tax_amount=snapshot["tax"],
+            discount_amount=snapshot["discount"],
             total_amount=snapshot["total"],
             status=CheckoutPaymentIntentStatus.PENDING,
             cart_snapshot=json.dumps(snapshot["items"]),
+            cart_fingerprint=fingerprint,
             expires_at=datetime.utcnow() + timedelta(minutes=30),
         )
         db.add(intent)
+        db.flush()
+        reserve_checkout_coupon(intent, coupon)
+        reserve_checkout_stock(db, intent)
         db.commit()
         db.refresh(intent)
     except HTTPException:
@@ -289,9 +435,12 @@ def create_payment_order(
         data={
             "razorpay_order_id": razorpay_order["id"],
             "razorpay_key_id": settings.RAZORPAY_KEY_ID,
+            "payment_required": True,
             "amount": amount_paise,
             "currency": "INR",
             "subtotal": snapshot["subtotal"],
+            "discount": snapshot["discount"],
+            "coupon_code": payload.coupon_code,
             "tax": snapshot["tax"],
             "total": snapshot["total"],
         },
@@ -324,6 +473,7 @@ def verify_payment(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Payment does not belong to this user")
 
     if intent.expires_at and intent.expires_at < datetime.utcnow():
+        release_checkout_stock(db, intent, reason="Checkout reservation expired before verification")
         intent.status = CheckoutPaymentIntentStatus.EXPIRED
         db.commit()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payment session expired")
@@ -365,10 +515,6 @@ def verify_payment(
         payload.razorpay_payment_id,
         payload.razorpay_signature,
     ):
-        intent.status = CheckoutPaymentIntentStatus.FAILED
-        intent.razorpay_payment_id = payload.razorpay_payment_id
-        intent.razorpay_signature = payload.razorpay_signature
-        db.commit()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid payment signature")
 
     try:
@@ -387,7 +533,7 @@ def verify_payment(
         db.rollback()
         raise
 
-    dispatch_fulfill_order(order.id)
+    _dispatch_fulfillment_safely(order.id)
 
     response = success(
         data=build_checkout_payment_response(order, "Payment verified and order created"),

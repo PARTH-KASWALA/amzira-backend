@@ -15,6 +15,8 @@ _redis_client: redis.Redis | None = None
 
 def get_redis() -> redis.Redis | None:
     global _redis_client
+    if settings.TESTING:
+        return None
     if _redis_client is not None:
         return _redis_client
     try:

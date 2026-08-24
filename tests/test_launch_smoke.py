@@ -198,15 +198,18 @@ def test_login_to_cod_checkout_smoke_flow(client: TestClient, db_session: Sessio
 
 
 def test_catalog_launch_health_reports_soft_launch_gaps(client: TestClient, db_session: Session):
-    _create_product_bundle(db_session, suffix="men-wedding", category_slug="men", occasion_slug="wedding")
-    _create_product_bundle(db_session, suffix="women-wedding", category_slug="women", occasion_slug="wedding")
-    _create_product_bundle(db_session, suffix="kids-festive", category_slug="kids", occasion_slug="festive")
+    _create_product_bundle(
+        db_session,
+        suffix="girls-lehenga",
+        category_slug="girls-lehenga-choli",
+        occasion_slug="festive",
+    )
 
     response = client.get("/health/catalog-launch")
     assert response.status_code == 200
 
     payload = response.json()
     assert payload["status"] == "unhealthy"
-    assert payload["requirements_total"] == 6
-    assert payload["requirements_ready"] == 3
-    assert payload["requirements_missing"] == 3
+    assert payload["requirements_total"] == 3
+    assert payload["requirements_ready"] == 1
+    assert payload["requirements_missing"] == 2

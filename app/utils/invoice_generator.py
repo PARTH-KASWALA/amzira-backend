@@ -10,7 +10,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
-from datetime import datetime
+from decimal import Decimal
 
 
 def generate_gst_invoice(order):
@@ -91,13 +91,13 @@ def generate_gst_invoice(order):
     ]
 
     for item in order.items:
-        cgst = item.total_price * 0.09
-        sgst = item.total_price * 0.09
+        cgst = item.total_price * Decimal("0.09")
+        sgst = item.total_price * Decimal("0.09")
 
         items_data.append(
             [
                 item.product_name,
-                item.hsn_code or "6104",
+                getattr(item, "hsn_code", None) or "6104",
                 str(item.quantity),
                 f"₹{item.unit_price:,.2f}",
                 f"₹{cgst:,.2f}",
@@ -106,15 +106,27 @@ def generate_gst_invoice(order):
             ]
         )
 
-    # Totals
+    half_tax = order.tax_amount / Decimal("2")
     items_data.extend(
         [
             ["", "", "", "", "", "Subtotal:", f"₹{order.subtotal:,.2f}"],
-            ["", "", "", "", "", "CGST (9%):", f"₹{order.tax_amount / 2:,.2f}"],
-            ["", "", "", "", "", "SGST (9%):", f"₹{order.tax_amount / 2:,.2f}"],
+            ["", "", "", "", "", "CGST (9%):", f"₹{half_tax:,.2f}"],
+            ["", "", "", "", "", "SGST (9%):", f"₹{half_tax:,.2f}"],
             ["", "", "", "", "", "Shipping:", f"₹{order.shipping_charge:,.2f}"],
-            ["", "", "", "", "", "Total:", f"₹{order.total_amount:,.2f}"],
         ]
+    )
+
+    discount_amount = order.discount_amount or Decimal("0")
+    if discount_amount > 0:
+        discount_label = (
+            f"Promo ({order.coupon_code}):" if order.coupon_code else "Discount:"
+        )
+        items_data.append(
+            ["", "", "", "", "", discount_label, f"-₹{discount_amount:,.2f}"]
+        )
+
+    items_data.append(
+        ["", "", "", "", "", "Total:", f"₹{order.total_amount:,.2f}"]
     )
 
     items_table = Table(
