@@ -560,6 +560,8 @@ CSRF_EXEMPT_PATHS = {
     "/api/v1/webhooks/razorpay",
     "/api/v1/shiprocket/webhook",
     "/api/v1/webhooks/fulfillment",
+    "/api/v1/internal/catalog-media",
+    "/api/v1/internal/catalog-import",
 }
 CSRF_PROTECTED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
