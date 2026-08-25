@@ -20,6 +20,8 @@ envVarGroups:
         value: '["https://amzira.com","https://www.amzira.com"]'
       - key: FRONTEND_URL
         value: https://amzira.com
+      - key: ADMIN_EMAIL
+        value: amziracare@gmail.com
       - key: TRUST_PROXY_HEADERS
         value: "True"
       - key: TRUSTED_PROXY_IPS

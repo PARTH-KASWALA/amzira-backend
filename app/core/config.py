@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     
     # Admin Security
     ADMIN_ALLOWED_IPS: str = ""  # Must be set via env in production
+    ADMIN_EMAIL: str = "admin@amzira.com"
     DEFAULT_ADMIN_PASSWORD: str = ""
     TRUST_PROXY_HEADERS: bool = True
     TRUSTED_PROXY_IPS: str = "127.0.0.1,::1"

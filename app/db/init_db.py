@@ -12,8 +12,25 @@ logger = logging.getLogger(__name__)
 def init_db(db: Session) -> None:
     """Initialize database with default data"""
     
-    # Create admin user
-    admin = db.query(User).filter(User.email == "admin@amzira.com").first()
+    # Create or migrate the admin user
+    configured_email = (settings.ADMIN_EMAIL or "").strip().lower()
+    if not configured_email:
+        raise RuntimeError("ADMIN_EMAIL must be set before initializing the database")
+
+    legacy_email = "admin@amzira.com"
+    admin = db.query(User).filter(User.email == configured_email).first()
+    if not admin and configured_email != legacy_email:
+        legacy_admin = (
+            db.query(User)
+            .filter(User.email == legacy_email, User.role == UserRole.ADMIN)
+            .first()
+        )
+        if legacy_admin:
+            legacy_admin.email = configured_email
+            db.add(legacy_admin)
+            admin = legacy_admin
+            logger.info("admin_email_migrated from=%s to=%s", legacy_email, configured_email)
+
     if not admin:
         seed_password = (settings.DEFAULT_ADMIN_PASSWORD or "").strip()
         if not seed_password:
@@ -27,7 +44,7 @@ def init_db(db: Session) -> None:
             logger.warning("%s env=%s", message, settings.ENVIRONMENT)
         else:
             admin = User(
-                email="admin@amzira.com",
+                email=configured_email,
                 password_hash=hash_password(seed_password),
                 full_name="AMZIRA Admin",
                 role=UserRole.ADMIN,
@@ -35,7 +52,7 @@ def init_db(db: Session) -> None:
                 is_verified=True
             )
             db.add(admin)
-            logger.info("admin_user_created email=admin@amzira.com")
+            logger.info("admin_user_created email=%s", configured_email)
     
     # Create categories
     categories_data = [
