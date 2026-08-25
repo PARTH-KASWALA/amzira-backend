@@ -217,8 +217,6 @@ services:
         fromService: {type: web, name: amzira-api, envVarKey: R2_ACCESS_KEY_ID}
       - key: R2_SECRET_ACCESS_KEY
         fromService: {type: web, name: amzira-api, envVarKey: R2_SECRET_ACCESS_KEY}
-      - key: SENTRY_DSN
-        fromService: {type: web, name: amzira-api, envVarKey: SENTRY_DSN}
 
   - type: worker
     name: amzira-beat
@@ -278,8 +276,6 @@ services:
         fromService: {type: web, name: amzira-api, envVarKey: R2_ACCESS_KEY_ID}
       - key: R2_SECRET_ACCESS_KEY
         fromService: {type: web, name: amzira-api, envVarKey: R2_SECRET_ACCESS_KEY}
-      - key: SENTRY_DSN
-        fromService: {type: web, name: amzira-api, envVarKey: SENTRY_DSN}
 
 databases:
   - name: amzira-postgres
