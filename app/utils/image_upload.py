@@ -38,23 +38,6 @@ def _build_r2_object_url(key: str) -> str:
     return f"{settings.R2_PUBLIC_URL.rstrip('/')}/{key}"
 
 
-def upload_r2_object(data: bytes, key: str, *, content_type: str = "application/octet-stream") -> str:
-    """Upload a prepared object to R2 and return its public URL."""
-    client = _get_r2_client()
-    if client is None:
-        raise RuntimeError("R2 is not configured")
-    client.upload_fileobj(
-        BytesIO(data),
-        settings.R2_BUCKET_NAME,
-        key,
-        ExtraArgs={
-            "ContentType": content_type,
-            "CacheControl": "public, max-age=31536000, immutable",
-        },
-    )
-    return _build_r2_object_url(key)
-
-
 def _upload_product_image_to_r2(data: bytes) -> str | None:
     client = _get_r2_client()
     if client is None:
