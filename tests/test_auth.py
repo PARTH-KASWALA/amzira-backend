@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.core.security import decode_token
 from app.api.v1.auth import _create_password_reset_token
 from app.models.user import User
+from app.middleware.csrf import _csrf_cookie_domain
 
 
 def _login(client: TestClient, email: str, password: str = "StrongPass1"):
@@ -91,6 +92,35 @@ def test_login_failure(client: TestClient):
     assert response.status_code == 401
     payload = response.json()
     assert payload["success"] is False
+
+
+def test_refresh_auth_failure_keeps_cors_headers(client: TestClient):
+    csrf_response = client.get("/api/v1/auth/csrf-token")
+    csrf_token = csrf_response.cookies.get("csrf_token")
+    assert csrf_token is not None
+
+    response = client.post(
+        "/api/v1/auth/refresh",
+        headers={
+            "Origin": "https://www.amzira.com",
+            "X-CSRF-Token": csrf_token,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.headers["access-control-allow-origin"] == "https://www.amzira.com"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_csrf_cookie_domain_is_shared_only_in_production(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(settings, "FRONTEND_URL", "https://www.amzira.com")
+    assert _csrf_cookie_domain() == "amzira.com"
+
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    assert _csrf_cookie_domain() is None
 
 
 def test_logout_revokes_access_token(client: TestClient):

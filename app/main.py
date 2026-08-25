@@ -584,3 +584,25 @@ async def csrf_middleware(request: Request, call_next):
     
     response = await call_next(request)
     return response
+
+
+@app.middleware("http")
+async def cors_error_response_middleware(request: Request, call_next):
+    """Keep CORS headers on responses returned before CORSMiddleware runs.
+
+    Auth refresh and CSRF failures can be produced by middleware or exception
+    handlers before Starlette's CORSMiddleware adds its response headers. A
+    browser then reports the request as a network failure instead of exposing
+    the API's 401/403 response to the storefront.
+    """
+    response = await call_next(request)
+    origin = request.headers.get("origin", "").strip().rstrip("/")
+    if origin and origin in cors_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Expose-Headers"] = "X-Process-Time"
+        vary = response.headers.get("Vary", "")
+        vary_values = {value.strip() for value in vary.split(",") if value.strip()}
+        if "Origin" not in vary_values:
+            response.headers["Vary"] = f"{vary}, Origin".lstrip(", ") if vary else "Origin"
+    return response

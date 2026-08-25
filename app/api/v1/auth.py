@@ -119,10 +119,10 @@ def _set_auth_cookies(
 
 
 @router.get("/csrf-token")
-def get_csrf_token():
+def get_csrf_token(request: Request):
     token = generate_csrf_token()
     response = JSONResponse(content=success(message="CSRF token set"))
-    set_csrf_cookie(response, token)
+    set_csrf_cookie(response, token, request)
     return response
 
 
