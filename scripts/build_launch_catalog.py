@@ -183,11 +183,12 @@ def build() -> None:
         )
         fabric = "Art Silk Jacquard" if "Work" in relative_folder else "Silk Blend"
         collection = "AMZIRA Heritage Work" if "Work" in relative_folder else "AMZIRA Haresh Butta"
+        subcategory = "south-indian-lehenga-choli" if category == "girls-lehenga-choli" else ""
         common = {
             "product_slug": slug,
             "name": name,
             "category_slug": category,
-            "subcategory_slug": "",
+            "subcategory_slug": subcategory,
             "base_price": f"{mrp:.2f}",
             "sale_price": f"{sale_price:.2f}",
             "description": description,
@@ -236,7 +237,7 @@ def build() -> None:
             "name": name,
             "slug": slug,
             "category_slug": category,
-            "subcategory_slug": None,
+            "subcategory_slug": subcategory or None,
             "base_price": str(mrp),
             "sale_price": str(sale_price),
             "description": description,
