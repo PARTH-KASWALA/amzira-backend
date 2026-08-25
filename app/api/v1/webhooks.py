@@ -69,6 +69,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     return success(data={"status": "ok"}, message="Webhook processed")
 
 
+@router.post("/webhooks/fulfillment")
 @router.post("/shiprocket/webhook")
 async def shiprocket_webhook(request: Request, db: Session = Depends(get_db)):
     body = await request.body()
