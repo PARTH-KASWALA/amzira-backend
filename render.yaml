@@ -96,7 +96,7 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2 --proxy-headers --forwarded-allow-ips '*'
-    preDeployCommand: sh -c 'alembic upgrade head && python -m app.db.init_db'
+    preDeployCommand: sh scripts/render_predeploy.sh
     healthCheckPath: /health
     autoDeployTrigger: checksPass
     domains:
