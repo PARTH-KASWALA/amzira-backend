@@ -256,7 +256,9 @@ async def add_request_id(request: Request, call_next):
 
 @app.middleware("http")
 async def protect_health_endpoints(request: Request, call_next):
-    if settings.ENVIRONMENT == "production" and request.url.path.startswith("/health"):
+    # Render's service health check calls the basic endpoint without a token.
+    # Keep detailed diagnostics protected while allowing that liveness probe.
+    if settings.ENVIRONMENT == "production" and request.url.path.startswith("/health/"):
         provided_token = (
             request.headers.get("X-Health-Token")
             or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
