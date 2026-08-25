@@ -18,21 +18,21 @@ from app.services.catalog_import_service import CatalogImportValidationError, im
 
 
 DEFAULT_CATALOG = ROOT / "build/catalog-full-inventory-local.json"
-EXPECTED_PRODUCTS = 107
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--apply", action="store_true", help="Commit the atomic upsert; default is a dry run")
+    parser.add_argument("--expected-products", type=int, default=None)
     args = parser.parse_args()
 
     raw_payload = json.loads(args.catalog.read_text(encoding="utf-8"))
     raw_payload["mode"] = "upsert"
     raw_payload["dry_run"] = not args.apply
     payload = CatalogImportRequest.model_validate(raw_payload)
-    if len(payload.products) != EXPECTED_PRODUCTS:
-        raise SystemExit(f"Expected {EXPECTED_PRODUCTS} products, found {len(payload.products)}")
+    if args.expected_products is not None and len(payload.products) != args.expected_products:
+        raise SystemExit(f"Expected {args.expected_products} products, found {len(payload.products)}")
 
     db = SessionLocal()
     try:

@@ -28,7 +28,7 @@ from app.db.session import SessionLocal, engine, get_db
 from app.models.category import Category
 from app.models.product import Product
 from app.models.user import User, UserRole
-from app.api.v1 import auth, products, cart, orders, users, payments, admin, reviews, wishlist, coupons, returns, stock, categories, commerce_checkout, webhooks
+from app.api.v1 import auth, products, cart, orders, users, payments, admin, internal, reviews, wishlist, coupons, returns, stock, categories, commerce_checkout, webhooks
 from app.services.shiprocket import validate_shiprocket_configuration
 
 API_VERSION = "1.0.0"
@@ -311,6 +311,7 @@ app.include_router(orders.router, prefix=f"{settings.API_V1_STR}/orders", tags=[
 app.include_router(users.router, prefix=f"{settings.API_V1_STR}/users", tags=["Users"])
 app.include_router(payments.router, prefix=f"{settings.API_V1_STR}/payments", tags=["Payments"])
 app.include_router(admin.router, prefix=f"{settings.API_V1_STR}/admin", tags=["Admin"])
+app.include_router(internal.router, prefix=f"{settings.API_V1_STR}/internal", tags=["Internal"])
 app.include_router(reviews.router, prefix=f"{settings.API_V1_STR}/reviews", tags=["Reviews"])
 app.include_router(wishlist.router, prefix=f"{settings.API_V1_STR}/wishlist", tags=["Wishlist"])
 app.include_router(coupons.router, prefix=f"{settings.API_V1_STR}/coupons", tags=["Coupons"])

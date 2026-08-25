@@ -89,6 +89,20 @@ def test_product_detail_returns_multiple_images_ordered(client: TestClient, db_s
     assert images[2]["image_url"].endswith("sherwani-01-back.jpg")
 
 
+def test_front_view_wins_when_primary_flag_points_to_back_view(client: TestClient, db_session: Session):
+    product = _create_product_with_images(db_session)
+    for image in product.images:
+        image.is_primary = image.alt_text == "Back"
+    db_session.commit()
+
+    response = client.get(f"/api/v1/products/{product.slug}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["primary_image"].endswith("sherwani-01-front.jpg")
+    assert data["images"][0]["alt_text"] == "Front"
+
+
 def test_product_detail_includes_rating_stock_and_variant_sku(client: TestClient, db_session: Session):
     product = _create_product_with_images(db_session)
     product.avg_rating = 4.7

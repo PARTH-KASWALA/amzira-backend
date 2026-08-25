@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
@@ -17,6 +18,30 @@ from app.models.product import Occasion, Product, ProductVariant
 PRODUCT_COUNT_CACHE_TTL_SECONDS = 60
 PRODUCT_LIST_CACHE_TTL_SECONDS = 60
 PRODUCT_DETAIL_CACHE_TTL_SECONDS = 120
+
+
+def _is_front_view(image) -> bool:
+    """Return whether catalog metadata identifies an image as the front view."""
+    label = f"{image.alt_text or ''} {image.image_url or ''}".lower()
+    return bool(re.search(r"(?:^|[^a-z])front(?:[^a-z]|$)", label))
+
+
+def _ordered_product_images(images):
+    """Keep front view first, then honor the explicit primary/display order metadata."""
+    return sorted(
+        images,
+        key=lambda image: (
+            not _is_front_view(image),
+            not bool(image.is_primary),
+            image.display_order,
+            image.id,
+        ),
+    )
+
+
+def _primary_image_url(images):
+    ordered_images = _ordered_product_images(images)
+    return ordered_images[0].image_url if ordered_images else None
 
 
 def _deserialize_tags(value: str | None) -> list[str]:
@@ -225,9 +250,7 @@ def get_cached_product_count(request: Request, query) -> int:
 
 
 def serialize_product_summary(product: Product) -> dict:
-    primary_image = next((img.image_url for img in product.images if img.is_primary), None)
-    if not primary_image and product.images:
-        primary_image = product.images[0].image_url
+    primary_image = _primary_image_url(product.images)
 
     active_variants = [variant for variant in product.variants if variant.is_active]
     in_stock_variants = sorted(
@@ -329,9 +352,7 @@ def get_product_detail(db: Session, *, slug: str) -> dict:
     if not product:
         raise ProductNotFound()
 
-    primary_image = next((img.image_url for img in product.images if img.is_primary), None)
-    if not primary_image and product.images:
-        primary_image = product.images[0].image_url
+    primary_image = _primary_image_url(product.images)
 
     data = {
         "id": product.id,
@@ -371,7 +392,7 @@ def get_product_detail(db: Session, *, slug: str) -> dict:
                 "display_order": img.display_order,
                 "is_primary": img.is_primary,
             }
-            for img in sorted(product.images, key=lambda x: (not x.is_primary, x.display_order))
+            for img in _ordered_product_images(product.images)
         ],
         "variants": [
             {

@@ -107,6 +107,8 @@ class Settings(BaseSettings):
     ADMIN_ALLOWED_IPS: str = ""  # Must be set via env in production
     ADMIN_EMAIL: str = "admin@amzira.com"
     DEFAULT_ADMIN_PASSWORD: str = ""
+    # One-time operational catalog refresh. Empty means the internal route is disabled.
+    CATALOG_REFRESH_TOKEN: str = ""
     TRUST_PROXY_HEADERS: bool = True
     TRUSTED_PROXY_IPS: str = "127.0.0.1,::1"
 

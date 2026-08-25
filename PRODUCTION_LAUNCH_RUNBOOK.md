@@ -81,6 +81,26 @@ python scripts/validate_launch_catalog.py --database-url "$DATABASE_URL"
 
 The expected dry-run result is 20 accepted products, zero rejected products, 140 exact SKUs, 120 media objects, and 500 units. Only after the production backup succeeds should the same command be rerun with `--apply`.
 
+For the corrected full photo and stock catalog, use a new CDN prefix so Cloudflare's immutable cache cannot continue serving the old back-view objects:
+
+```bash
+python scripts/build_updated_inventory_photo_catalog.py \
+  --media-base-url https://cdn.amzira.com/catalog-v2 \
+  --media-prefix catalog-v2 \
+  --output-json build/catalog-updated-inventory-photos-public.json \
+  --output-manifest build/catalog-updated-inventory-photos-public-media.csv
+python scripts/prepare_and_upload_catalog_media.py \
+  --manifest build/catalog-updated-inventory-photos-public-media.csv \
+  --output-dir build/catalog-updated-inventory-photos-media \
+  --upload
+python scripts/import_full_inventory_catalog.py \
+  --catalog build/catalog-updated-inventory-photos-public.json \
+  --expected-products 110 \
+  --apply
+```
+
+Run the upload before the database import, and run both against the production environment only after taking a database backup. The generated catalog marks the front view as primary and assigns each active size a deterministic stock value between 21 and 50 (inclusive).
+
 ## 5. Acceptance Before Live Payments
 
 1. Confirm `/health`, `/health/database`, `/health/email`, and `/health/catalog-launch` are healthy using the health token.

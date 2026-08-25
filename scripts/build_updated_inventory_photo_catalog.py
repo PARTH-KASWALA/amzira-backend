@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import re
@@ -13,9 +14,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY_ROOT = Path("/Users/parthkaswala/Desktop/Amzira_Inventory")
 BASE_CATALOG = ROOT / "build/catalog-full-inventory-local.json"
-OUTPUT_JSON = ROOT / "build/catalog-updated-inventory-photos-local.json"
-MEDIA_MANIFEST = ROOT / "build/catalog-updated-inventory-photos-media.csv"
 LOCAL_MEDIA_BASE = "http://localhost:8000/static/uploads/products/catalog"
+DEFAULT_OUTPUT_JSON = ROOT / "build/catalog-updated-inventory-photos-local.json"
+DEFAULT_MEDIA_MANIFEST = ROOT / "build/catalog-updated-inventory-photos-media.csv"
 
 VIEW_ORDER = (
     "Front_View",
@@ -148,7 +149,7 @@ def slugify(value: str) -> str:
 def stock_left(slug: str, size: str) -> int:
     seed = f"{slug}:{size}"
     checksum = sum((index + 1) * ord(character) for index, character in enumerate(seed))
-    return 21 + (checksum % 29)
+    return 21 + (checksum % 30)
 
 
 def apply_discount(product: dict) -> None:
@@ -186,8 +187,12 @@ def view_images(folder: Path) -> list[Path]:
     return sorted(files, key=fallback_key)
 
 
-def image_payloads(product: dict, folder_rel: str) -> tuple[list[dict], list[dict]]:
+def image_payloads(product: dict, folder_rel: str, media_base_url: str, media_prefix: str) -> tuple[list[dict], list[dict]]:
     folder = INVENTORY_ROOT / folder_rel
+    if not folder.is_dir():
+        # A previously prepared local catalog is a safe fallback when the original
+        # shoot folder has been moved after the catalog was imported.
+        folder = ROOT / "static/uploads/products/catalog" / product["slug"]
     if not folder.is_dir():
         raise FileNotFoundError(folder)
     sources = view_images(folder)
@@ -197,11 +202,12 @@ def image_payloads(product: dict, folder_rel: str) -> tuple[list[dict], list[dic
     payloads = []
     rows = []
     for order, source in enumerate(sources, start=1):
-        url = f"{LOCAL_MEDIA_BASE}/{product['slug']}/{order:02d}.webp"
+        url = f"{media_base_url.rstrip('/')}/{product['slug']}/{order:02d}.webp"
+        view_label = "Front View" if order == 1 else source.stem.replace("_", " ").title()
         payloads.append(
             {
                 "image_url": url,
-                "alt_text": f"{product['name']} - {source.stem.replace('_', ' ').title()}",
+                "alt_text": f"{product['name']} - {view_label}",
                 "display_order": order - 1,
                 "is_primary": order == 1,
             }
@@ -212,7 +218,7 @@ def image_payloads(product: dict, folder_rel: str) -> tuple[list[dict], list[dic
                 "display_order": order - 1,
                 "is_primary": str(order == 1).lower(),
                 "source_path": str(source),
-                "r2_key": f"catalog/{product['slug']}/{order:02d}.webp",
+                "r2_key": f"{media_prefix.strip('/')}/{product['slug']}/{order:02d}.webp",
                 "public_url": url,
             }
         )
@@ -240,7 +246,13 @@ def new_product_from_template(template: dict, folder_rel: str, index: int) -> di
     return product
 
 
-def build() -> dict:
+def build(
+    *,
+    media_base_url: str = LOCAL_MEDIA_BASE,
+    media_prefix: str = "catalog",
+    output_json: Path = DEFAULT_OUTPUT_JSON,
+    output_manifest: Path = DEFAULT_MEDIA_MANIFEST,
+) -> dict:
     base = json.loads(BASE_CATALOG.read_text(encoding="utf-8"))
     products = []
     media_rows = []
@@ -250,7 +262,7 @@ def build() -> dict:
         item = deepcopy(product)
         folder_rel = PRODUCT_FOLDER_MAP[item["external_id"]]
         apply_discount(item)
-        item["images"], rows = image_payloads(item, folder_rel)
+        item["images"], rows = image_payloads(item, folder_rel, media_base_url, media_prefix)
         for variant in item["variants"]:
             variant["stock_quantity"] = stock_left(item["slug"], variant["size"])
         products.append(item)
@@ -262,16 +274,16 @@ def build() -> dict:
         if folder_rel in used_folders:
             continue
         product = new_product_from_template(template, folder_rel, index)
-        product["images"], rows = image_payloads(product, folder_rel)
+        product["images"], rows = image_payloads(product, folder_rel, media_base_url, media_prefix)
         products.append(product)
         media_rows.extend(rows)
         used_folders.add(folder_rel)
 
-    OUTPUT_JSON.write_text(
+    output_json.write_text(
         json.dumps({"products": products, "mode": "upsert", "dry_run": True}, indent=2),
         encoding="utf-8",
     )
-    with MEDIA_MANIFEST.open("w", newline="", encoding="utf-8") as handle:
+    with output_manifest.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=["product_slug", "display_order", "is_primary", "source_path", "r2_key", "public_url"],
@@ -284,12 +296,25 @@ def build() -> dict:
         "new_products_added": len(products) - len(base["products"]),
         "products": len(products),
         "media": len(media_rows),
-        "json": str(OUTPUT_JSON),
-        "manifest": str(MEDIA_MANIFEST),
+        "json": str(output_json),
+        "manifest": str(output_manifest),
+        "media_base_url": media_base_url,
+        "media_prefix": media_prefix,
     }
     print(json.dumps(report, indent=2))
     return report
 
 
 if __name__ == "__main__":
-    build()
+    parser = argparse.ArgumentParser(description="Build the updated inventory photo catalog")
+    parser.add_argument("--media-base-url", default=LOCAL_MEDIA_BASE)
+    parser.add_argument("--media-prefix", default="catalog")
+    parser.add_argument("--output-json", type=Path, default=DEFAULT_OUTPUT_JSON)
+    parser.add_argument("--output-manifest", type=Path, default=DEFAULT_MEDIA_MANIFEST)
+    args = parser.parse_args()
+    build(
+        media_base_url=args.media_base_url,
+        media_prefix=args.media_prefix,
+        output_json=args.output_json,
+        output_manifest=args.output_manifest,
+    )
