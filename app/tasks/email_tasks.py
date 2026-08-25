@@ -76,9 +76,9 @@ def send_email_task(
             from_email=from_email,
         )
         _send_email_smtp(msg)
-        logger.info("email_sent", to=to_email, subject=subject)
+        logger.info("email_sent to=%s subject=%s", to_email, subject)
     except Exception as exc:
-        logger.exception("email_send_error", exc_info=exc)
+        logger.exception("email_send_error")
         raise self.retry(exc=exc)
 
 
@@ -94,7 +94,7 @@ def send_order_confirmation(self, order_id: int):
     try:
         order = db.query(Order).filter(Order.id == order_id).first()
         if not order or not order.user:
-            logger.error("order_confirmation_failed", order_id=order_id)
+            logger.error("order_confirmation_failed order_id=%s", order_id)
             return
 
         html = order_confirmation_template(order, order.user)
@@ -108,10 +108,10 @@ def send_order_confirmation(self, order_id: int):
         )
 
         _send_email_smtp(msg)
-        logger.info("order_confirmation_sent", email=order.user.email)
+        logger.info("order_confirmation_sent email=%s", order.user.email)
 
     except Exception as exc:
-        logger.exception("order_confirmation_error", exc_info=exc)
+        logger.exception("order_confirmation_error")
         raise self.retry(exc=exc)
     finally:
         db.close()
@@ -142,10 +142,10 @@ def send_order_shipped(self, order_id: int, tracking_number: str):
         )
 
         _send_email_smtp(msg)
-        logger.info("order_shipped_sent", order_id=order_id)
+        logger.info("order_shipped_sent order_id=%s", order_id)
 
     except Exception as exc:
-        logger.exception("order_shipped_error", exc_info=exc)
+        logger.exception("order_shipped_error")
         raise self.retry(exc=exc)
     finally:
         db.close()
@@ -178,7 +178,7 @@ def send_order_delivered(self, order_id: int):
         _send_email_smtp(msg)
 
     except Exception as exc:
-        logger.exception("order_delivered_error", exc_info=exc)
+        logger.exception("order_delivered_error")
         raise self.retry(exc=exc)
     finally:
         db.close()
@@ -201,8 +201,8 @@ def send_password_reset(self, user_email: str, reset_token: str):
         )
 
         _send_email_smtp(msg)
-        logger.info("password_reset_sent", email=user_email)
+        logger.info("password_reset_sent email=%s", user_email)
 
     except Exception as exc:
-        logger.exception("password_reset_error", exc_info=exc)
+        logger.exception("password_reset_error")
         raise self.retry(exc=exc)
