@@ -209,8 +209,6 @@ services:
         fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_PASSWORD}
       - key: SHIPROCKET_WEBHOOK_SECRET
         fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_WEBHOOK_SECRET}
-      - key: SHIPROCKET_CHANNEL_ID
-        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_CHANNEL_ID}
       - key: SHIPROCKET_PICKUP_POSTCODE
         fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_PICKUP_POSTCODE}
       - key: R2_ACCOUNT_ID
@@ -272,8 +270,6 @@ services:
         fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_PASSWORD}
       - key: SHIPROCKET_WEBHOOK_SECRET
         fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_WEBHOOK_SECRET}
-      - key: SHIPROCKET_CHANNEL_ID
-        fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_CHANNEL_ID}
       - key: SHIPROCKET_PICKUP_POSTCODE
         fromService: {type: web, name: amzira-api, envVarKey: SHIPROCKET_PICKUP_POSTCODE}
       - key: R2_ACCOUNT_ID
