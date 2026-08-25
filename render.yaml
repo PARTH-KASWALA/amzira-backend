@@ -166,7 +166,7 @@ services:
     region: singapore
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    dockerCommand: sh -eux -c 'python scripts/wait_for_migrations.py && exec python -m celery -A app.core.celery_app:celery_app worker --loglevel=INFO --queues=celery,emails --concurrency=2'
+    dockerCommand: sh scripts/start_worker.sh
     autoDeployTrigger: checksPass
     envVars:
       - fromGroup: amzira-production-common
@@ -225,7 +225,7 @@ services:
     region: singapore
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    dockerCommand: sh -eux -c 'python scripts/wait_for_migrations.py && exec python -m celery -A app.core.celery_app:celery_app beat --loglevel=INFO --schedule=/tmp/celerybeat-schedule'
+    dockerCommand: sh scripts/start_beat.sh
     autoDeployTrigger: checksPass
     envVars:
       - fromGroup: amzira-production-common
