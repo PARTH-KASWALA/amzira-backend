@@ -30,7 +30,12 @@ FRONT_VIEW_RE = re.compile(r"(?:^|[^a-z])front(?:[^a-z]|$)", re.IGNORECASE)
 
 
 def _is_front(image) -> bool:
-    return bool(FRONT_VIEW_RE.search(f"{image.alt_text or ''} {image.image_url or ''}"))
+    # The catalog importer marks the canonical first image as primary, while
+    # older rows may use either "Front View" or "front_view" in alt text.
+    return bool(
+        image.is_primary
+        or FRONT_VIEW_RE.search(f"{image.alt_text or ''} {image.image_url or ''}")
+    )
 
 
 def _head(url: str) -> tuple[bool, str]:
