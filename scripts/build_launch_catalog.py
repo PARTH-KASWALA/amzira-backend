@@ -18,6 +18,39 @@ LOCAL_OUTPUT_JSON = ROOT / "build/catalog-launch-work-haresh-local.json"
 CDN_BASE = "https://cdn.amzira.com/catalog"
 LOCAL_MEDIA_BASE = "http://localhost:8000/static/uploads/products/catalog"
 
+# The launch catalog keeps the original inventory IDs for SKU traceability,
+# while the local photo shoot was reorganized into numbered folders. Keep the
+# mapping here so a regenerated manifest points at the current source files.
+INVENTORY_FOLDER_MAP = {
+    "455-Work/1": "14/1",
+    "455-Work/2": "14/2",
+    "455-Work/4": "14/3",
+    "455-Work/5": "14/22",
+    "455-Work/6": "14/5",
+    "455-Work/7": "14/6",
+    "455-Work/8": "14/7",
+    "455-Work/9": "14/8",
+    "455-Work/10": "14/9",
+    "455-Work/11": "14/10",
+    "455-Work/12": "14/12",
+    "455-Work/13": "14/13",
+    "455-Work/14": "14/11",
+    "455-Work/15": "14/14",
+    "455-Work/16": "14/15",
+    "455-Work/17": "14/16",
+    "455-Work/18": "14/23",
+    "455-Work/19": "14/18",
+    "455-Work/20": "14/19",
+    "455-Work/21": "14/20",
+    "455-Work/22": "14/21",
+    "456_Haresh_Checks/1": "15",
+    "456_Haresh_Checks/2": "2/1",
+    "456_Haresh_Checks/3": "2/2",
+    "456_Haresh_Checks/4": "2/3",
+    "456_Haresh_Checks/5": "2/4",
+    "456_Haresh_Checks/6": "2/5",
+}
+
 SIZES = [
     ("18", "1-2Y"),
     ("20", "2-3Y"),
@@ -51,12 +84,12 @@ PRODUCTS = [
     ("455-Work/20", "KLC-GRN-MRN-PEACOCKWORK-00-0440", "Kiara Green Maroon Peacock Work Pattu Pavadai", "Green / Maroon", "Peacock Work", "pattu-pavadai", 2199, 1499),
     ("455-Work/21", "KLC-YLW-GRN-TREEDEERWORK-00-0441", "Saanvi Yellow Green Tree Deer Pattu Pavadai", "Yellow / Green", "Tree Deer Work", "pattu-pavadai", 2199, 1499),
     ("455-Work/22", "KLC-LGN-RED-NBLU-JAQ-WRK-00-0440", "Amaira Light Green Red Jacquard Work Lehenga Choli", "Light Green / Red / Navy", "Jacquard Work", "girls-lehenga-choli", 2099, 1449),
-    ("456_Haresh_Checks/1", "KLC-HBT-RBL-GLD-CHK-0456-01", "Neela Royal Blue Checked Butta Pattu Pavadai", "Royal Blue / Gold", "Checked Butta", "south-indian-kids-ethnic-wear", 1899, 1299),
-    ("456_Haresh_Checks/2", "KLC-HBT-GRN-RPK-CHK-0456-02", "Gauri Green Rani Pink Checked Butta Pattu Pavadai", "Green / Rani Pink", "Checked Butta", "south-indian-kids-ethnic-wear", 1899, 1299),
-    ("456_Haresh_Checks/3", "KLC-HBT-PUR-GRN-CHK-0456-03", "Mahi Purple Green Checked Butta Pattu Pavadai", "Purple / Green", "Checked Butta", "south-indian-kids-ethnic-wear", 1899, 1299),
-    ("456_Haresh_Checks/4", "KLC-HBT-RBL-IVR-CHK-0456-04", "Tara Royal Blue Ivory Checked Butta Pattu Pavadai", "Royal Blue / Ivory", "Checked Butta", "south-indian-kids-ethnic-wear", 1899, 1299),
-    ("456_Haresh_Checks/5", "KLC-HBT-RBL-ORG-CHK-0456-05", "Aarohi Royal Blue Orange Checked Butta Pattu Pavadai", "Royal Blue / Orange", "Checked Butta", "south-indian-kids-ethnic-wear", 1899, 1299),
-    ("456_Haresh_Checks/6", "KLC-HBT-RED-BLK-CHK-0456-06", "Ishani Red Black Checked Butta Pattu Pavadai", "Red / Black", "Checked Butta", "south-indian-kids-ethnic-wear", 1899, 1299),
+    ("456_Haresh_Checks/1", "KLC-HBT-RBL-GLD-CHK-0456-01", "Neela Royal Blue Checked Butta Pattu Pavadai", "Royal Blue / Gold", "Checked Butta", "pattu-pavadai", 1899, 1299),
+    ("456_Haresh_Checks/2", "KLC-HBT-GRN-RPK-CHK-0456-02", "Gauri Green Rani Pink Checked Butta Pattu Pavadai", "Green / Rani Pink", "Checked Butta", "pattu-pavadai", 1899, 1299),
+    ("456_Haresh_Checks/3", "KLC-HBT-PUR-GRN-CHK-0456-03", "Mahi Purple Green Checked Butta Pattu Pavadai", "Purple / Green", "Checked Butta", "pattu-pavadai", 1899, 1299),
+    ("456_Haresh_Checks/4", "KLC-HBT-RBL-IVR-CHK-0456-04", "Tara Royal Blue Ivory Checked Butta Pattu Pavadai", "Royal Blue / Ivory", "Checked Butta", "pattu-pavadai", 1899, 1299),
+    ("456_Haresh_Checks/5", "KLC-HBT-RBL-ORG-CHK-0456-05", "Aarohi Royal Blue Orange Checked Butta Pattu Pavadai", "Royal Blue / Orange", "Checked Butta", "pattu-pavadai", 1899, 1299),
+    ("456_Haresh_Checks/6", "KLC-HBT-RED-BLK-CHK-0456-06", "Ishani Red Black Checked Butta Pattu Pavadai", "Red / Black", "Checked Butta", "pattu-pavadai", 1899, 1299),
 ]
 
 CSV_HEADERS = [
@@ -114,7 +147,7 @@ def build() -> None:
     seen_skus: set[str] = set()
 
     for index, (relative_folder, base_sku, name, color, motif, category, mrp, sale_price) in enumerate(PRODUCTS):
-        folder = INVENTORY_ROOT / relative_folder
+        folder = INVENTORY_ROOT / INVENTORY_FOLDER_MAP.get(relative_folder, relative_folder)
         if not folder.is_dir():
             raise FileNotFoundError(folder)
         slug = slugify(name)

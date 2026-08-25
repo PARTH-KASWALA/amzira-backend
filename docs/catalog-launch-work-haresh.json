@@ -750,12 +750,6 @@
           "alt_text": "Nila Red Royal Blue Jacquard Work Lehenga Choli - view 6",
           "display_order": 5,
           "is_primary": false
-        },
-        {
-          "image_url": "https://cdn.amzira.com/catalog/nila-red-royal-blue-jacquard-work-lehenga-choli/07.webp",
-          "alt_text": "Nila Red Royal Blue Jacquard Work Lehenga Choli - view 7",
-          "display_order": 6,
-          "is_primary": false
         }
       ],
       "variants": [
@@ -2847,12 +2841,6 @@
           "alt_text": "Amaira Light Green Red Jacquard Work Lehenga Choli - view 7",
           "display_order": 6,
           "is_primary": false
-        },
-        {
-          "image_url": "https://cdn.amzira.com/catalog/amaira-light-green-red-jacquard-work-lehenga-choli/08.webp",
-          "alt_text": "Amaira Light Green Red Jacquard Work Lehenga Choli - view 8",
-          "display_order": 7,
-          "is_primary": false
         }
       ],
       "variants": [
@@ -2928,7 +2916,7 @@
     {
       "name": "Neela Royal Blue Checked Butta Pattu Pavadai",
       "slug": "neela-royal-blue-checked-butta-pattu-pavadai",
-      "category_slug": "south-indian-kids-ethnic-wear",
+      "category_slug": "pattu-pavadai",
       "subcategory_slug": null,
       "base_price": "1899",
       "sale_price": "1299",
@@ -2985,6 +2973,12 @@
           "image_url": "https://cdn.amzira.com/catalog/neela-royal-blue-checked-butta-pattu-pavadai/05.webp",
           "alt_text": "Neela Royal Blue Checked Butta Pattu Pavadai - view 5",
           "display_order": 4,
+          "is_primary": false
+        },
+        {
+          "image_url": "https://cdn.amzira.com/catalog/neela-royal-blue-checked-butta-pattu-pavadai/06.webp",
+          "alt_text": "Neela Royal Blue Checked Butta Pattu Pavadai - view 6",
+          "display_order": 5,
           "is_primary": false
         }
       ],
@@ -3061,7 +3055,7 @@
     {
       "name": "Gauri Green Rani Pink Checked Butta Pattu Pavadai",
       "slug": "gauri-green-rani-pink-checked-butta-pattu-pavadai",
-      "category_slug": "south-indian-kids-ethnic-wear",
+      "category_slug": "pattu-pavadai",
       "subcategory_slug": null,
       "base_price": "1899",
       "sale_price": "1299",
@@ -3206,7 +3200,7 @@
     {
       "name": "Mahi Purple Green Checked Butta Pattu Pavadai",
       "slug": "mahi-purple-green-checked-butta-pattu-pavadai",
-      "category_slug": "south-indian-kids-ethnic-wear",
+      "category_slug": "pattu-pavadai",
       "subcategory_slug": null,
       "base_price": "1899",
       "sale_price": "1299",
@@ -3351,7 +3345,7 @@
     {
       "name": "Tara Royal Blue Ivory Checked Butta Pattu Pavadai",
       "slug": "tara-royal-blue-ivory-checked-butta-pattu-pavadai",
-      "category_slug": "south-indian-kids-ethnic-wear",
+      "category_slug": "pattu-pavadai",
       "subcategory_slug": null,
       "base_price": "1899",
       "sale_price": "1299",
@@ -3490,7 +3484,7 @@
     {
       "name": "Aarohi Royal Blue Orange Checked Butta Pattu Pavadai",
       "slug": "aarohi-royal-blue-orange-checked-butta-pattu-pavadai",
-      "category_slug": "south-indian-kids-ethnic-wear",
+      "category_slug": "pattu-pavadai",
       "subcategory_slug": null,
       "base_price": "1899",
       "sale_price": "1299",
@@ -3547,6 +3541,12 @@
           "image_url": "https://cdn.amzira.com/catalog/aarohi-royal-blue-orange-checked-butta-pattu-pavadai/05.webp",
           "alt_text": "Aarohi Royal Blue Orange Checked Butta Pattu Pavadai - view 5",
           "display_order": 4,
+          "is_primary": false
+        },
+        {
+          "image_url": "https://cdn.amzira.com/catalog/aarohi-royal-blue-orange-checked-butta-pattu-pavadai/06.webp",
+          "alt_text": "Aarohi Royal Blue Orange Checked Butta Pattu Pavadai - view 6",
+          "display_order": 5,
           "is_primary": false
         }
       ],
@@ -3623,7 +3623,7 @@
     {
       "name": "Ishani Red Black Checked Butta Pattu Pavadai",
       "slug": "ishani-red-black-checked-butta-pattu-pavadai",
-      "category_slug": "south-indian-kids-ethnic-wear",
+      "category_slug": "pattu-pavadai",
       "subcategory_slug": null,
       "base_price": "1899",
       "sale_price": "1299",
