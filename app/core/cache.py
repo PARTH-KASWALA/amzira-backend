@@ -80,6 +80,7 @@ def cache_invalidate_prefix(prefix: str) -> None:
 
 def invalidate_product_cache(slugs: Iterable[str] | None = None) -> None:
     cache_invalidate_prefix("cache:products:list:")
+    cache_invalidate_prefix("cache:products:count:")
     if not slugs:
         return
     for slug in slugs:
