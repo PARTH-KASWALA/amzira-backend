@@ -18,7 +18,7 @@ from app.tasks.order_tasks import dispatch_fulfill_order
 from app.services.shiprocket import (
     ShiprocketAPIError,
     apply_return_tracking_update,
-    verify_shiprocket_webhook_signature,
+    verify_shiprocket_webhook_request,
 )
 from app.services.return_service import apply_razorpay_refund_webhook, mark_order_delivered
 from app.utils.response import success
@@ -77,8 +77,9 @@ async def shiprocket_webhook(request: Request, db: Session = Depends(get_db)):
         request.headers.get("X-Shiprocket-Signature")
         or request.headers.get("X-Webhook-Signature")
     )
+    token = request.headers.get("x-api-key")
     try:
-        verify_shiprocket_webhook_signature(body, signature)
+        verify_shiprocket_webhook_request(body, signature=signature, token=token)
     except ShiprocketAPIError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -113,7 +114,7 @@ async def shiprocket_webhook(request: Request, db: Session = Depends(get_db)):
             return_request = return_query.filter(ReturnRequest.shiprocket_return_order_id == str(order_reference)).first()
 
         if return_request is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
+            return success(data={"status": "ignored"}, message="Webhook received")
 
         apply_return_tracking_update(return_request, payload)
         db.commit()

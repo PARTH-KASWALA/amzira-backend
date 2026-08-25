@@ -117,6 +117,21 @@ def verify_shiprocket_webhook_signature(body: bytes, signature: str | None) -> N
         raise ShiprocketAPIError("Invalid Shiprocket webhook signature")
 
 
+def verify_shiprocket_webhook_request(
+    body: bytes,
+    *,
+    signature: str | None,
+    token: str | None,
+) -> None:
+    """Accept Shiprocket's configured x-api-key token or an HMAC signature."""
+    secret = (settings.SHIPROCKET_WEBHOOK_SECRET or "").strip()
+    if token is not None:
+        if not secret or not hmac.compare_digest(secret, token.strip()):
+            raise ShiprocketAPIError("Invalid Shiprocket webhook token")
+        return
+    verify_shiprocket_webhook_signature(body, signature)
+
+
 def _build_order_items(order: Order) -> tuple[list[dict[str, Any]], Decimal]:
     items: list[dict[str, Any]] = []
     total_weight = Decimal("0.00")
