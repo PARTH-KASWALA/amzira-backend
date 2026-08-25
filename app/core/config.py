@@ -74,11 +74,13 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     
     # Frontend
-    FRONTEND_URL: str = "https://amzira.com"
+    FRONTEND_URL: str = "https://www.amzira.com"
     
     # Monitoring (Optional - Add to .env for production)
     SENTRY_DSN: str = ""  # Optional: Sentry error tracking DSN
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.1
     HEALTHCHECK_TOKEN: str = ""
+    SLOW_REQUEST_THRESHOLD_MS: int = 1000
 
     # Shiprocket
     SHIPROCKET_EMAIL: str = ""

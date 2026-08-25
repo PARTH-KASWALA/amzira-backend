@@ -1,5 +1,10 @@
 # AMZIRA Launch Execution Status - 2026-08-12
 
+> Status update: the production catalog now contains 110 live products with
+> catalog-v2 CDN media and deterministic 21-50 stock values. This historical
+> note remains useful for the original deployment gates; use the current
+> production checklist and `scripts/reconcile_catalog.py` for today’s counts.
+
 ## Verdict
 
 Repository and catalog preparation are ready for production deployment. Public checkout remains **NO-GO** until the external services and live acceptance gates below are completed with real credentials.

@@ -48,3 +48,32 @@ jobs:
         run: pytest -q
       - name: Verify migration head
         run: test "$(alembic heads | awk '{print $1}')" = "$(alembic current | awk '{print $1}')"
+
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt pip-audit bandit
+      - name: Python dependency audit
+        run: pip-audit -r requirements.txt
+      - name: Bandit SAST
+        run: bandit -q -r app --severity-level medium
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          skip-dirs: .venv,.git,static/uploads
+          severity: HIGH,CRITICAL
+          exit-code: 1

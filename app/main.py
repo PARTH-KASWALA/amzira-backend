@@ -57,10 +57,9 @@ def standardized_error_response(status_code: int, message: str, errors=None) -> 
 # CONFIGURE LOGGING (FIRST)
 # --------------------------------------------------
 configure_logging()
-# TODO: Integrate APM instrumentation (e.g., OpenTelemetry) for traces/metrics.
-# TODO: Ship structured logs to centralized log aggregation in production.
-# TODO: Configure alerting for elevated API error rates (5xx/4xx spikes).
-# TODO: Configure alerting for repeated payment_failed events.
+# Sentry captures unhandled errors and transaction traces when a production DSN
+# is configured. Structured request and commerce-event logs are emitted for the
+# platform log drain to alert on 5xx, latency, payment, stock, and queue events.
 
 # --------------------------------------------------
 # INITIALIZE SENTRY (ONLY IN PRODUCTION)
@@ -70,7 +69,9 @@ if settings.ENVIRONMENT == "production" and settings.SENTRY_DSN:
         sentry_sdk.init(
             dsn=settings.SENTRY_DSN,
             environment=settings.ENVIRONMENT,
-            traces_sample_rate=0.1,
+            release=os.getenv("GIT_COMMIT") or None,
+            send_default_pii=False,
+            traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
             integrations=[
                 FastApiIntegration(),
                 SqlalchemyIntegration(),
@@ -86,11 +87,13 @@ if settings.ENVIRONMENT == "production" and settings.SENTRY_DSN:
 # --------------------------------------------------
 # CREATE FASTAPI APP (SINGLE INITIALIZATION)
 # --------------------------------------------------
+DOCS_ENABLED = settings.ENVIRONMENT != "production"
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    docs_url=f"{settings.API_V1_STR}/docs",
-    redoc_url=f"{settings.API_V1_STR}/redoc"
+    openapi_url=f"{settings.API_V1_STR}/openapi.json" if DOCS_ENABLED else None,
+    docs_url=f"{settings.API_V1_STR}/docs" if DOCS_ENABLED else None,
+    redoc_url=f"{settings.API_V1_STR}/redoc" if DOCS_ENABLED else None,
 )
 
 
@@ -276,6 +279,7 @@ async def protect_health_endpoints(request: Request, call_next):
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger = structlog.get_logger()
+    start_time = time.time()
 
     logger.info(
         "request_started",
@@ -292,6 +296,16 @@ async def log_requests(request: Request, call_next):
         path=request.url.path,
         status_code=response.status_code,
     )
+
+    elapsed_ms = (time.time() - start_time) * 1000
+    if response.status_code >= 500 or elapsed_ms >= settings.SLOW_REQUEST_THRESHOLD_MS:
+        logger.warning(
+            "request_health_signal",
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=round(elapsed_ms, 2),
+        )
 
     return response
 
@@ -473,7 +487,7 @@ def catalog_launch_health_check(db: Session = Depends(get_db)):
 def root():
     return {
         "message": "AMZIRA E-Commerce API",
-        "docs": f"{settings.API_V1_STR}/docs",
+        "docs": f"{settings.API_V1_STR}/docs" if DOCS_ENABLED else None,
         "version": API_VERSION
     }
 
