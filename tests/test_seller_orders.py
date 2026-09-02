@@ -263,6 +263,15 @@ def test_customer_cannot_read_seller_orders(client: TestClient, db_session: Sess
     assert response.json()["message"] == "Admin access required"
 
 
+def test_sensitive_order_responses_are_never_cacheable(client: TestClient):
+    response = client.get("/api/v1/admin/orders")
+
+    assert response.status_code == 401
+    assert response.headers["cache-control"] == "private, no-store, max-age=0"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["expires"] == "0"
+
+
 def test_admin_can_filter_list_and_read_complete_order_detail(
     client: TestClient,
     db_session: Session,

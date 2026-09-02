@@ -197,6 +197,20 @@ async def add_security_headers(request: Request, call_next):
     )
     if settings.ENVIRONMENT == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+    sensitive_prefixes = (
+        f"{settings.API_V1_STR}/admin",
+        f"{settings.API_V1_STR}/cart",
+        f"{settings.API_V1_STR}/orders",
+        f"{settings.API_V1_STR}/payments",
+        f"{settings.API_V1_STR}/returns",
+        f"{settings.API_V1_STR}/users",
+        f"{settings.API_V1_STR}/wishlist",
+    )
+    if request.url.path.startswith(sensitive_prefixes):
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 
