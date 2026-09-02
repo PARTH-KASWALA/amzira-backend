@@ -33,6 +33,7 @@ jobs:
       TESTING: "true"
       CELERY_TASK_ALWAYS_EAGER: "true"
       AMZIRA_RUN_POSTGRES_ENUM_TEST: "1"
+      AMZIRA_RUN_POSTGRES_CONCURRENCY: "1"
 
     steps:
       - uses: actions/checkout@v4
