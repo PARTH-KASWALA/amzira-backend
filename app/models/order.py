@@ -40,7 +40,16 @@ class Order(Base):
     total_amount = Column(Numeric(10, 2), nullable=False)
     
     # Status & Tracking
-    status = Column(Enum(OrderStatus), default=OrderStatus.PLACED, nullable=False, index=True)
+    status = Column(
+        Enum(
+            OrderStatus,
+            name="orderstatus",
+            values_callable=lambda enum_class: [member.value for member in enum_class],
+        ),
+        default=OrderStatus.PLACED,
+        nullable=False,
+        index=True,
+    )
     expires_at = Column(DateTime, nullable=True, index=True)
     stock_deducted = Column(Boolean, default=False, nullable=False)
     idempotency_key = Column(String(64), unique=True, nullable=True, index=True)

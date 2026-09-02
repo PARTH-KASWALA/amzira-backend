@@ -2,12 +2,13 @@ import csv
 import json
 import logging
 import zipfile
+from datetime import datetime
 from io import BytesIO, StringIO
 from defusedxml import ElementTree as ET
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Body, Request
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_
+from sqlalchemy.orm import Session, joinedload, selectinload
 from typing import List, Optional
 from pydantic import BaseModel, EmailStr, ValidationError
 from slugify import slugify
@@ -17,10 +18,13 @@ from app.models.user import User
 from app.models.product import Product, ProductImage, ProductVariant, Occasion
 from app.models.category import Category, Subcategory
 from app.models.order import Order, OrderStatus
+from app.models.payment import Payment, PaymentStatus
 from app.schemas.product import ProductCreate
 from app.schemas.catalog_import import CatalogImportRequest
 from app.services.catalog_import_service import CatalogImportValidationError, import_catalog
 from app.services.order_service import auto_cancel_pending_orders
+from app.schemas.order_tracking import OrderStatusUpdate
+from app.services.order_tracking_service import ALLOWED_STATUS_TRANSITIONS, OrderTrackingService
 from app.core.rate_limiter import limiter
 from app.core.cache import invalidate_product_cache
 from app.utils.image_upload import save_product_image, delete_product_image
@@ -770,17 +774,41 @@ def update_variant_stock(
 @limiter.limit("60/minute")
 def get_all_orders(
     request: Request,
-    status: Optional[str] = None,
-    page: int = 1,
-    limit: int = 20,
-    current_admin: User = Depends(require_admin),
+    status: Optional[OrderStatus] = Query(None),
+    payment_status: Optional[PaymentStatus] = Query(None),
+    search: Optional[str] = Query(None, min_length=1, max_length=100),
+    start_date: Optional[datetime] = Query(None),
+    end_date: Optional[datetime] = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    _: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Admin: Get all orders"""
-    query = db.query(Order)
+    query = db.query(Order).options(
+        joinedload(Order.user),
+        joinedload(Order.payment),
+        selectinload(Order.items),
+    )
     
     if status:
         query = query.filter(Order.status == status)
+    if payment_status:
+        query = query.join(Order.payment).filter(Payment.payment_status == payment_status)
+    if search:
+        pattern = f"%{search.strip()}%"
+        query = query.join(Order.user).filter(
+            or_(
+                Order.order_number.ilike(pattern),
+                User.full_name.ilike(pattern),
+                User.email.ilike(pattern),
+                User.phone.ilike(pattern),
+            )
+        )
+    if start_date:
+        query = query.filter(Order.created_at >= start_date)
+    if end_date:
+        query = query.filter(Order.created_at <= end_date)
     
     total = query.count()
     orders = query.order_by(Order.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
@@ -792,11 +820,15 @@ def get_all_orders(
             "order_number": order.order_number,
             "customer_name": order.user.full_name,
             "customer_email": order.user.email,
+            "customer_phone": order.user.phone,
             "status": order.status.value,
-            "total_amount": order.total_amount,
+            "payment_status": order.payment.payment_status.value if order.payment else None,
+            "payment_method": order.payment.payment_method.value if order.payment else None,
+            "total_amount": float(order.total_amount),
             "items_count": len(order.items),
             "created_at": order.created_at,
-            "tracking_number": order.tracking_number
+            "tracking_number": order.tracking_number,
+            "courier_name": order.courier_name or order.carrier_name,
         })
     
     return success(
@@ -804,10 +836,24 @@ def get_all_orders(
             "total": total,
             "page": page,
             "limit": limit,
+            "pages": (total + limit - 1) // limit,
             "orders": orders_response,
         },
         message="Orders retrieved successfully",
     )
+
+
+@router.get("/orders/export")
+@limiter.limit("20/minute")
+def export_orders_route(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    status: Optional[str] = None,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    return _export_orders(request, start_date, end_date, status, current_admin, db)
 
 
 @router.get("/orders/{order_id}")
@@ -815,22 +861,36 @@ def get_all_orders(
 def get_order_detail_admin(
     request: Request,
     order_id: int,
-    current_admin: User = Depends(require_admin),
+    _: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Admin: Get order details"""
-    order = db.query(Order).filter(Order.id == order_id).first()
+    order = (
+        db.query(Order)
+        .options(
+            joinedload(Order.user),
+            joinedload(Order.payment),
+            joinedload(Order.shipping_address),
+            selectinload(Order.items),
+            selectinload(Order.status_history),
+        )
+        .filter(Order.id == order_id)
+        .first()
+    )
     
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     
     items = [
         {
+            "id": item.id,
+            "product_id": item.product_id,
+            "variant_id": item.variant_id,
             "product_name": item.product_name,
             "variant_details": item.variant_details,
             "quantity": item.quantity,
-            "unit_price": item.unit_price,
-            "total_price": item.total_price
+            "unit_price": float(item.unit_price),
+            "total_price": float(item.total_price),
         }
         for item in order.items
     ]
@@ -845,10 +905,15 @@ def get_order_detail_admin(
                 "phone": order.user.phone,
             },
             "status": order.status.value,
-            "subtotal": order.subtotal,
-            "tax_amount": order.tax_amount,
-            "shipping_charge": order.shipping_charge,
-            "total_amount": order.total_amount,
+            "allowed_next_statuses": sorted(
+                next_status.value for next_status in ALLOWED_STATUS_TRANSITIONS.get(order.status, set())
+            ),
+            "subtotal": float(order.subtotal),
+            "tax_amount": float(order.tax_amount or 0),
+            "shipping_charge": float(order.shipping_charge or 0),
+            "discount_amount": float(order.discount_amount or 0),
+            "coupon_code": order.coupon_code,
+            "total_amount": float(order.total_amount),
             "items": items,
             "shipping_address": {
                 "full_name": order.shipping_address.full_name,
@@ -858,14 +923,41 @@ def get_order_detail_admin(
                 "city": order.shipping_address.city,
                 "state": order.shipping_address.state,
                 "pincode": order.shipping_address.pincode,
+                "country": order.shipping_address.country,
             },
             "payment": {
                 "method": order.payment.payment_method.value if order.payment else None,
                 "status": order.payment.payment_status.value if order.payment else None,
+                "amount": float(order.payment.amount) if order.payment else None,
+                "currency": order.payment.currency if order.payment else None,
+                "transaction_reference": (
+                    order.payment.razorpay_payment_id or order.payment.transaction_id
+                    if order.payment else None
+                ),
+                "refunded_amount": float(order.payment.refunded_amount or 0) if order.payment else 0,
+                "paid_at": order.payment.paid_at if order.payment else None,
             },
             "customer_notes": order.customer_notes,
             "admin_notes": order.admin_notes,
             "tracking_number": order.tracking_number,
+            "carrier_name": order.carrier_name,
+            "courier_name": order.courier_name,
+            "awb_code": order.awb_code,
+            "tracking_url": order.tracking_url,
+            "current_location": order.current_location,
+            "estimated_delivery_date": order.estimated_delivery_date,
+            "delivered_at": order.delivered_at,
+            "status_history": [
+                {
+                    "id": history.id,
+                    "old_status": history.old_status,
+                    "new_status": history.new_status,
+                    "changed_by": history.changed_by,
+                    "notes": history.notes,
+                    "created_at": history.created_at,
+                }
+                for history in order.status_history
+            ],
             "created_at": order.created_at,
         },
         message="Order details retrieved successfully",
@@ -896,35 +988,21 @@ Behavior:
 def update_order_status(
     request: Request,
     order_id: int,
-    status: str = Form(...),
-    tracking_number: Optional[str] = Form(None),
-    admin_notes: Optional[str] = Form(None),
+    status_update: OrderStatusUpdate,
     current_admin: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Admin: Update order status"""
-    order = db.query(Order).filter(Order.id == order_id).first()
-    
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    
-    # Validate status
-    try:
-        order.status = OrderStatus(status)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid status")
-    
-    if tracking_number:
-        order.tracking_number = tracking_number
-    
-    if admin_notes:
-        order.admin_notes = admin_notes
-    
-    db.commit()
-    
-    # TODO: Send email notification to customer
-    
-    return success(message="Order status updated successfully")
+    """Admin: Update order lifecycle and tracking through the canonical service."""
+    order = OrderTrackingService.update_order_status(
+        db,
+        order_id,
+        status_update,
+        current_admin.id,
+    )
+    return success(
+        data={"order_id": order.id, "status": order.status.value},
+        message="Order status updated successfully",
+    )
 
 
 # ============= CATEGORY MANAGEMENT =============
@@ -1566,9 +1644,7 @@ async def bulk_upload_products(
     )
 
 
-@router.get("/orders/export")
-@limiter.limit("20/minute")
-def export_orders(
+def _export_orders(
     request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,

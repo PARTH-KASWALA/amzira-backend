@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 from app.models.order import OrderStatus
@@ -6,10 +6,10 @@ from app.models.order import OrderStatus
 
 class OrderStatusUpdate(BaseModel):
     status: OrderStatus
-    tracking_number: Optional[str] = None
-    carrier_name: Optional[str] = None
+    tracking_number: Optional[str] = Field(default=None, max_length=100)
+    carrier_name: Optional[str] = Field(default=None, max_length=100)
     estimated_delivery_date: Optional[datetime] = None
-    notes: Optional[str] = None
+    notes: Optional[str] = Field(default=None, max_length=1000)
 
 
 class OrderStatusHistoryResponse(BaseModel):

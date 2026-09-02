@@ -78,6 +78,10 @@ envVarGroups:
         value: "2000"
       - key: DEFAULT_SHIPPING_CHARGE
         value: "100"
+      - key: CHECKOUT_ENABLED
+        value: "False"
+      - key: COD_ENABLED
+        value: "False"
       - key: ALLOW_STARTUP_SCHEMA_PATCHING
         value: "False"
 

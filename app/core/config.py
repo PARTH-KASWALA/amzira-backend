@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     GST_RATE: float = 0.05
     FREE_SHIPPING_THRESHOLD: float = 2000.0
     DEFAULT_SHIPPING_CHARGE: float = 100.0
+    CHECKOUT_ENABLED: bool = False
+    COD_ENABLED: bool = False
     
     # Email
     SMTP_HOST: str = "smtp.gmail.com"

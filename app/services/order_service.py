@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List
 import structlog
 
@@ -19,27 +19,19 @@ def auto_cancel_pending_orders(db: Session) -> int:
     Returns:
         int: Number of orders cancelled
     """
-    cutoff_time = datetime.utcnow() - timedelta(minutes=30)
-
     pending_orders: List[Order] = (
         db.query(Order)
         .filter(
-            Order.status.in_([OrderStatus.PLACED, OrderStatus.PENDING])
+            Order.status.in_([OrderStatus.PLACED, OrderStatus.PENDING]),
+            Order.expires_at.isnot(None),
+            Order.expires_at <= datetime.utcnow(),
         )
+        .with_for_update()
         .all()
     )
 
     cancelled_count = 0
     for order in pending_orders:
-        is_expired = False
-        if order.expires_at:
-            is_expired = order.expires_at <= datetime.utcnow()
-        else:
-            is_expired = order.created_at < cutoff_time
-
-        if not is_expired:
-            continue
-
         if order.stock_deducted:
             variant_ids = sorted({item.variant_id for item in order.items})
             locked_variants = {
@@ -57,13 +49,14 @@ def auto_cancel_pending_orders(db: Session) -> int:
                     variant.stock_quantity += item.quantity
             order.stock_deducted = False
 
+        previous_status = order.status
         order.status = OrderStatus.CANCELLED
         order.expires_at = None
         logger.info(
             "order_expired",
             order_id=order.id,
             user_id=order.user_id,
-            previous_status=order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
+            previous_status=previous_status.value if isinstance(previous_status, OrderStatus) else str(previous_status),
         )
         cancelled_count += 1
 

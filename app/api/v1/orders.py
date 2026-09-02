@@ -33,6 +33,7 @@ from app.utils.response import success
 from app.core.cache import invalidate_product_cache
 from app.utils.order_utils import generate_order_number
 from app.core.rate_limiter import limiter
+from app.core.config import settings
 import logging
 
 
@@ -291,6 +292,16 @@ def create_order(
     db: Session = Depends(get_db),
 ):
     """Create a COD order from the authenticated user's cart."""
+    if not settings.CHECKOUT_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Checkout is temporarily unavailable",
+        )
+    if not settings.COD_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail="Cash on Delivery is not available",
+        )
     existing_order = (
         _order_query(db)
         .filter(Order.idempotency_key == order_data.idempotency_key)
@@ -564,14 +575,19 @@ def cancel_order(
     db: Session = Depends(get_db)
 ):
     """Cancel order"""
-    order = _order_query(db).filter(
-        Order.id == order_id,
-        Order.user_id == current_user.id
-    ).first()
+    order = (
+        _order_query(db)
+        .filter(Order.id == order_id, Order.user_id == current_user.id)
+        .with_for_update()
+        .first()
+    )
     
     if not order:
         raise OrderNotFound()
     
+    if order.status == OrderStatus.CANCELLED:
+        return success(message="Order already cancelled")
+
     # Can only cancel if not shipped
     if order.status in [OrderStatus.SHIPPED, OrderStatus.OUT_FOR_DELIVERY, OrderStatus.DELIVERED]:
         raise HTTPException(
@@ -579,15 +595,22 @@ def cancel_order(
             detail="Cannot cancel shipped/delivered orders"
         )
     
+    if (
+        order.payment is not None
+        and order.payment.payment_method == PaymentMethod.RAZORPAY
+        and order.payment.payment_status == PaymentStatus.SUCCESS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Paid orders require support-assisted cancellation and refund",
+        )
+
     previous_status = order.status
     order.status = OrderStatus.CANCELLED
 
     # Restore stock only if this order already deducted inventory.
     if order.stock_deducted and previous_status in {OrderStatus.PLACED, OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PROCESSING}:
-        for item in order.items:
-            variant = item.variant
-            variant.stock_quantity += item.quantity
-        order.stock_deducted = False
+        OrderTrackingService.restore_inventory_once(db, order)
 
     order.expires_at = None
 
@@ -764,6 +787,21 @@ def get_return_eligibility(
     return success(data=payload, message="Return eligibility retrieved")
 
 
+@router.get("/my/tracking", response_model=dict)
+@limiter.limit("30/minute")
+def get_user_orders_tracking(
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get tracking information for all orders owned by the current customer."""
+    tracking_list = OrderTrackingService.get_user_orders_tracking(db, current_user.id)
+    return success(
+        data=[tracking.model_dump() for tracking in tracking_list],
+        message="Orders tracking retrieved",
+    )
+
+
 @router.get("/{order_reference}/tracking", response_model=dict)
 @limiter.limit("30/minute")
 def get_order_tracking(
@@ -801,24 +839,6 @@ def get_order_tracking(
         "data": payload,
         "order": payload,
     }
-
-
-@router.get("/my/tracking", response_model=dict)
-@limiter.limit("30/minute")
-def get_user_orders_tracking(
-    request: Request,
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
-):
-    """Get tracking information for all user's orders."""
-    tracking_list = OrderTrackingService.get_user_orders_tracking(db, current_user.id)
-    return success(
-        data=[t.dict() for t in tracking_list],
-        message="Orders tracking retrieved",
-    )
-    
-
-
 
 
 from fastapi.responses import StreamingResponse

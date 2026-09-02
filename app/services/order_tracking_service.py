@@ -5,6 +5,8 @@ from typing import List, Optional
 from datetime import datetime
 
 from app.models.order import Order, OrderStatus
+from app.models.payment import PaymentMethod, PaymentStatus
+from app.models.product import ProductVariant
 from app.models.order_status_history import OrderStatusHistory
 from app.models.user import User
 from app.schemas.order_tracking import OrderStatusUpdate, OrderTrackingResponse, OrderStatusHistoryResponse
@@ -88,6 +90,27 @@ def build_status_timeline(status: OrderStatus | str | None) -> list[dict[str, st
 
 
 class OrderTrackingService:
+
+    @staticmethod
+    def restore_inventory_once(db: Session, order: Order) -> None:
+        if not order.stock_deducted:
+            return
+
+        variant_ids = sorted({item.variant_id for item in order.items})
+        locked_variants = {
+            variant.id: variant
+            for variant in (
+                db.query(ProductVariant)
+                .filter(ProductVariant.id.in_(variant_ids))
+                .with_for_update()
+                .all()
+            )
+        }
+        for item in order.items:
+            variant = locked_variants.get(item.variant_id)
+            if variant is not None:
+                variant.stock_quantity += item.quantity
+        order.stock_deducted = False
     
     @staticmethod
     def update_order_status(
@@ -97,7 +120,12 @@ class OrderTrackingService:
         changed_by: Optional[int] = None
     ) -> Order:
         """Update order status with history tracking. Admin only."""
-        order = db.query(Order).filter(Order.id == order_id).first()
+        order = (
+            db.query(Order)
+            .filter(Order.id == order_id)
+            .with_for_update()
+            .first()
+        )
         if not order:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -114,6 +142,34 @@ class OrderTrackingService:
                 detail=f"Cannot transition order from {current_status.value} to {target_status.value}",
             )
 
+        if target_status in {OrderStatus.SHIPPED, OrderStatus.OUT_FOR_DELIVERY}:
+            effective_tracking = status_update.tracking_number or order.tracking_number or order.awb_code
+            effective_carrier = status_update.carrier_name or order.carrier_name or order.courier_name
+            if not effective_tracking or not effective_carrier:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Tracking number and courier are required before an order can be shipped",
+                )
+
+        if target_status == OrderStatus.CANCELLED and current_status != OrderStatus.CANCELLED:
+            payment = order.payment
+            if (
+                payment is not None
+                and payment.payment_method == PaymentMethod.RAZORPAY
+                and payment.payment_status == PaymentStatus.SUCCESS
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Paid orders require a refund before cancellation can be completed",
+                )
+            OrderTrackingService.restore_inventory_once(db, order)
+            order.expires_at = None
+
+        previous_tracking_number = order.tracking_number
+        previous_carrier_name = order.carrier_name
+        previous_eta = order.estimated_delivery_date
+        previous_admin_notes = order.admin_notes
+
         # Update order fields
         order.status = target_status
         if status_update.tracking_number:
@@ -123,7 +179,11 @@ class OrderTrackingService:
             order.courier_name = status_update.carrier_name
         if status_update.estimated_delivery_date:
             order.estimated_delivery_date = status_update.estimated_delivery_date
-        if target_status == OrderStatus.DELIVERED:
+        if status_update.notes:
+            order.admin_notes = status_update.notes
+        if target_status == OrderStatus.DELIVERED and (
+            current_status != OrderStatus.DELIVERED or order.delivered_at is None
+        ):
             mark_order_delivered(order)
         elif target_status == OrderStatus.RETURN_REQUESTED:
             order.return_status = "requested"
@@ -132,6 +192,16 @@ class OrderTrackingService:
         else:
             refresh_return_status(order)
         
+        changed = (
+            current_status != target_status
+            or previous_tracking_number != order.tracking_number
+            or previous_carrier_name != order.carrier_name
+            or previous_eta != order.estimated_delivery_date
+            or previous_admin_notes != order.admin_notes
+        )
+        if not changed:
+            return order
+
         # Create status history entry
         history_entry = OrderStatusHistory(
             order_id=order_id,
@@ -170,15 +240,16 @@ class OrderTrackingService:
             User, OrderStatusHistory.changed_by == User.id
         ).filter(OrderStatusHistory.order_id == order_id).order_by(OrderStatusHistory.created_at).all()
         
+        expose_admin_history = user_role == "admin"
         history_responses = [
             OrderStatusHistoryResponse(
                 id=h.OrderStatusHistory.id,
                 order_id=h.OrderStatusHistory.order_id,
                 old_status=h.OrderStatusHistory.old_status,
                 new_status=h.OrderStatusHistory.new_status,
-                changed_by=h.OrderStatusHistory.changed_by,
-                changer_name=h.changer_name,
-                notes=h.OrderStatusHistory.notes,
+                changed_by=h.OrderStatusHistory.changed_by if expose_admin_history else None,
+                changer_name=h.changer_name if expose_admin_history else None,
+                notes=h.OrderStatusHistory.notes if expose_admin_history else None,
                 created_at=h.OrderStatusHistory.created_at
             ) for h in history
         ]
@@ -215,9 +286,9 @@ class OrderTrackingService:
                     order_id=h.OrderStatusHistory.order_id,
                     old_status=h.OrderStatusHistory.old_status,
                     new_status=h.OrderStatusHistory.new_status,
-                    changed_by=h.OrderStatusHistory.changed_by,
-                    changer_name=h.changer_name,
-                    notes=h.OrderStatusHistory.notes,
+                    changed_by=None,
+                    changer_name=None,
+                    notes=None,
                     created_at=h.OrderStatusHistory.created_at
                 ) for h in history
             ]

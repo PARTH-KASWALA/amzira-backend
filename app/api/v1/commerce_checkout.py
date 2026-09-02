@@ -4,11 +4,11 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_active_user, require_admin
+from app.api.deps import get_current_active_user
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.address import Address
@@ -48,6 +48,25 @@ from app.core.rate_limiter import limiter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _ensure_checkout_enabled() -> None:
+    if not settings.CHECKOUT_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Checkout is temporarily unavailable",
+        )
+
+
+@router.get("/commerce/status")
+def commerce_status():
+    return success(
+        data={
+            "checkout_enabled": settings.CHECKOUT_ENABLED,
+            "cod_enabled": settings.CHECKOUT_ENABLED and settings.COD_ENABLED,
+        },
+        message="Commerce status retrieved",
+    )
 
 
 def _dispatch_fulfillment_safely(order_id: int) -> None:
@@ -220,6 +239,7 @@ def create_payment_order(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
+    _ensure_checkout_enabled()
     _ensure_user_owns_resource(current_user, payload.user_id)
     user = (
         db.query(User)
@@ -542,44 +562,3 @@ def verify_payment(
     response["status"] = "success"
     response["order_id"] = order.id
     return response
-
-@router.get("/admin/orders")
-def admin_list_orders(
-    request: Request,
-    page: int = Query(1, ge=1),
-    limit: int = Query(50, ge=1, le=200),
-    status_filter: str | None = Query(None),
-    _: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    _ = request
-    query = (
-        db.query(Order)
-        .options(joinedload(Order.user))
-        .order_by(Order.created_at.desc())
-    )
-    if status_filter:
-        query = query.filter(Order.status == status_filter)
-    total = query.count()
-    orders = query.offset((page - 1) * limit).limit(limit).all()
-    return success(
-        data={
-            "orders": [
-                {
-                    "order_id": order.id,
-                    "order_number": order.order_number,
-                    "user_id": order.user_id,
-                    "customer_name": order.user.full_name if order.user else None,
-                    "total_amount": float(order.total_amount),
-                    "status": order.status.value if isinstance(order.status, OrderStatus) else str(order.status),
-                    "created_at": order.created_at,
-                }
-                for order in orders
-            ],
-            "total": total,
-            "page": page,
-            "limit": limit,
-            "pages": (total + limit - 1) // limit,
-        },
-        message="Orders retrieved",
-    )

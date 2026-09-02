@@ -11,6 +11,8 @@ os.environ["ENVIRONMENT"] = "development"
 os.environ["TESTING"] = "true"
 os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"
 os.environ["CELERY_TASK_STORE_EAGER_RESULT"] = "false"
+os.environ["CHECKOUT_ENABLED"] = "true"
+os.environ["COD_ENABLED"] = "true"
 
 import app.models  # noqa: F401
 import app.models.return_request  # noqa: F401
