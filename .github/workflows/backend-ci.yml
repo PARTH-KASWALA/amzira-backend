@@ -36,8 +36,8 @@ jobs:
       AMZIRA_RUN_POSTGRES_CONCURRENCY: "1"
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -56,7 +56,7 @@ jobs:
         run: pip-audit -r requirements.txt
       - name: Bandit SAST
         run: bandit -q -r app scripts --severity-level medium
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: aquasecurity/trivy-action@v0.36.0
