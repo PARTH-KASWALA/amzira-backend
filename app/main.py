@@ -35,7 +35,6 @@ API_VERSION = "1.0.0"
 SOFT_LAUNCH_REQUIREMENTS = [
     {"category_slug": "girls-lehenga-choli", "min_products": 1},
     {"category_slug": "pattu-pavadai", "min_products": 1},
-    {"category_slug": "south-indian-kids-ethnic-wear", "min_products": 1},
 ]
 
 

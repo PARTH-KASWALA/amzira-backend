@@ -210,6 +210,6 @@ def test_catalog_launch_health_reports_soft_launch_gaps(client: TestClient, db_s
 
     payload = response.json()
     assert payload["status"] == "unhealthy"
-    assert payload["requirements_total"] == 3
+    assert payload["requirements_total"] == 2
     assert payload["requirements_ready"] == 1
-    assert payload["requirements_missing"] == 2
+    assert payload["requirements_missing"] == 1
