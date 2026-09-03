@@ -4,7 +4,9 @@ This runbook covers the external acceptance work that must be completed after th
 
 ## Selected Production Platform
 
-- Frontend: Vercel Pro, connected to the `amzira-frontend` repository.
+- Frontend target: Vercel Pro, connected to the `amzira-frontend` repository.
+  The account must report Pro or Enterprise before commercial launch; Vercel
+  [restricts Hobby to personal, non-commercial use](https://vercel.com/docs/plans/hobby).
 - Backend stack: Render Blueprint from `render.yaml` in Singapore (`amzira-api`, `amzira-worker`, `amzira-beat`, PostgreSQL, and persistent Key Value).
 - Product media: Cloudflare R2 bucket `amzira-products` on `https://cdn.amzira.com`.
 - Transactional email: Resend SMTP after SPF, DKIM, and DMARC verification.
@@ -139,7 +141,11 @@ replace the transaction, refund, delivery, monitoring, or restore drills below.
 
 ## 6. Go/No-Go Gate
 
-Live payments are **NO-GO** if any health check fails, credentials are still test-mode, a dry-run catalog import has rejections, webhook signatures are not accepted, backup restore is unproven, checkout creates duplicate orders, totals differ from Razorpay, or stock becomes negative.
+Commercial launch and live payments are **NO-GO** while the Vercel team remains
+on Hobby. They are also **NO-GO** if any health check fails, credentials are
+still test-mode, a dry-run catalog import has rejections, webhook signatures are
+not accepted, backup restore is unproven, checkout creates duplicate orders,
+totals differ from Razorpay, or stock becomes negative.
 
 After all checks pass, switch to the live Razorpay key pair, perform one controlled real transaction and refund, verify settlement/refund in the Razorpay dashboard, and then open checkout publicly.
 
