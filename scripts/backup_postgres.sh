@@ -6,6 +6,16 @@ set -euo pipefail
 
 PG_DATABASE_URL="${DATABASE_URL/+psycopg2/}"
 
+# Render PostgreSQL requires TLS. Keep local development/restore drills usable
+# without TLS while enforcing it for every non-local database URL.
+if [[ "${PG_DATABASE_URL}" != *"sslmode="* && "${PG_DATABASE_URL}" != *"localhost"* && "${PG_DATABASE_URL}" != *"127.0.0.1"* && "${PG_DATABASE_URL}" != *"[::1]"* ]]; then
+  if [[ "${PG_DATABASE_URL}" == *"?"* ]]; then
+    PG_DATABASE_URL="${PG_DATABASE_URL}&sslmode=require"
+  else
+    PG_DATABASE_URL="${PG_DATABASE_URL}?sslmode=require"
+  fi
+fi
+
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
