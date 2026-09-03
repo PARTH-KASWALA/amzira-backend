@@ -11,10 +11,11 @@ import json
 import re
 import sys
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-from xml.etree import ElementTree
+from urllib.parse import urlsplit
 
+import httpx
+from defusedxml import ElementTree
+from defusedxml.common import DefusedXmlException
 from sqlalchemy import func
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,29 +39,74 @@ def _is_front(image) -> bool:
     )
 
 
-def _head(url: str) -> tuple[bool, str]:
+def _validated_http_url(url: str, *, allowed_host: str | None = None) -> str:
+    parsed = urlsplit(str(url or "").strip())
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("URL must be an HTTP(S) URL without embedded credentials")
+    if allowed_host is not None and parsed.hostname.lower() != allowed_host.lower():
+        raise ValueError("URL host does not match the configured public media host")
+    return parsed.geturl()
+
+
+def _configured_media_host() -> str:
+    parsed = urlsplit(settings.R2_PUBLIC_URL.strip())
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("R2_PUBLIC_URL must be a valid HTTPS URL")
+    return parsed.hostname
+
+
+def _redacted_url(url: str) -> str:
     try:
-        request = Request(url, method="HEAD", headers={"User-Agent": "amzira-catalog-reconciler/1.0"})
-        with urlopen(request, timeout=10) as response:
-            return 200 <= response.status < 400, str(response.status)
-    except HTTPError as exc:
-        return False, str(exc.code)
-    except (URLError, TimeoutError, ValueError) as exc:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return "<invalid>"
+        return f"{parsed.scheme}://{parsed.hostname}{parsed.path}"
+    except (TypeError, ValueError):
+        return "<invalid>"
+
+
+def _head(url: str, *, allowed_host: str) -> tuple[bool, str]:
+    try:
+        target = _validated_http_url(url, allowed_host=allowed_host)
+        response = httpx.head(
+            target,
+            timeout=10,
+            follow_redirects=False,
+            headers={"User-Agent": "amzira-catalog-reconciler/1.0"},
+        )
+        return 200 <= response.status_code < 400, str(response.status_code)
+    except (httpx.HTTPError, ValueError) as exc:
         return False, type(exc).__name__
 
 
 def _sitemap_slugs(url: str) -> tuple[set[str], str | None]:
     try:
-        request = Request(url, headers={"User-Agent": "amzira-catalog-reconciler/1.0"})
-        with urlopen(request, timeout=20) as response:
-            root = ElementTree.fromstring(response.read())
+        target = _validated_http_url(url)
+        response = httpx.get(
+            target,
+            timeout=20,
+            follow_redirects=False,
+            headers={"User-Agent": "amzira-catalog-reconciler/1.0"},
+        )
+        response.raise_for_status()
+        root = ElementTree.fromstring(response.content)
         locs = {
             element.text.rstrip("/").rsplit("/product/", 1)[-1]
             for element in root.iter()
             if element.tag.endswith("loc") and element.text and "/product/" in element.text
         }
         return locs, None
-    except (HTTPError, URLError, TimeoutError, ElementTree.ParseError, ValueError) as exc:
+    except (
+        httpx.HTTPError,
+        DefusedXmlException,
+        ElementTree.ParseError,
+        ValueError,
+    ) as exc:
         return set(), f"Sitemap check failed: {type(exc).__name__}"
 
 
@@ -76,6 +122,12 @@ def main() -> int:
 
     errors: list[str] = []
     media_failures: list[dict[str, str]] = []
+    media_host: str | None = None
+    if args.check_media:
+        try:
+            media_host = _configured_media_host()
+        except ValueError as exc:
+            errors.append(str(exc))
     db = SessionLocal()
     try:
         products = db.query(Product).filter(Product.is_active == True).all()
@@ -108,10 +160,12 @@ def main() -> int:
                 errors.append(f"{product.slug}: first image is not the front view")
 
             for image in ordered_images:
-                if args.check_media:
-                    ok, status = _head(image.image_url)
+                if args.check_media and media_host:
+                    ok, status = _head(image.image_url, allowed_host=media_host)
                     if not ok:
-                        media_failures.append({"url": image.image_url, "status": status})
+                        media_failures.append(
+                            {"url": _redacted_url(image.image_url), "status": status}
+                        )
 
         out = {
             "status": "ok",

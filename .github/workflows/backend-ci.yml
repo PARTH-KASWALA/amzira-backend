@@ -55,7 +55,7 @@ jobs:
       - name: Python dependency audit
         run: pip-audit -r requirements.txt
       - name: Bandit SAST
-        run: bandit -q -r app --severity-level medium
+        run: bandit -q -r app scripts --severity-level medium
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
