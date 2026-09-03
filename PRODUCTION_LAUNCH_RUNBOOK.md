@@ -103,6 +103,29 @@ Run the upload before the database import, and run both against the production e
 
 ## 5. Acceptance Before Live Payments
 
+Run the public production verifier first. It fails unless checkout and COD remain
+disabled, and it prints no product names, customer data, order numbers, tokens, or
+credentials:
+
+```bash
+.venv/bin/python scripts/verify_production_launch.py
+```
+
+For the operator-only pass, provide `AMZIRA_HEALTHCHECK_TOKEN`,
+`AMZIRA_SELLER_EMAIL`, and `AMZIRA_SELLER_PASSWORD` through the approved secret
+manager, run from an address in `ADMIN_ALLOWED_IPS`, and require both protected
+groups:
+
+```bash
+.venv/bin/python scripts/verify_production_launch.py \
+  --require-protected-health \
+  --require-seller
+```
+
+Seller acceptance establishes and closes an admin session; it does not mutate an
+order. Save the PII-free summary in the launch ticket. This verifier does not
+replace the transaction, refund, delivery, monitoring, or restore drills below.
+
 1. Confirm `/health`, `/health/database`, `/health/email`, and `/health/catalog-launch` are healthy using the health token.
 2. Run registration, login, refresh, logout, password reset, and a second-customer authorization test.
 3. In Razorpay test mode, purchase one low-stock SKU; verify one order, one payment, correct stock, email, and My Orders visibility.
