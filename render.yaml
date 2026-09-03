@@ -87,7 +87,7 @@ envVarGroups:
 
 services:
   - type: keyvalue
-    name: amzira-redis
+    name: amzira-redis-persistent
     plan: starter
     region: singapore
     ipAllowList: []
@@ -116,17 +116,17 @@ services:
       - key: REDIS_URL
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: CELERY_BROKER_URL
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: SECRET_KEY
         generateValue: true
@@ -181,17 +181,17 @@ services:
       - key: REDIS_URL
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: CELERY_BROKER_URL
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: SECRET_KEY
         fromService: {type: web, name: amzira-api, envVarKey: SECRET_KEY}
@@ -240,17 +240,17 @@ services:
       - key: REDIS_URL
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: CELERY_BROKER_URL
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
           type: keyvalue
-          name: amzira-redis
+          name: amzira-redis-persistent
           property: connectionString
       - key: SECRET_KEY
         fromService: {type: web, name: amzira-api, envVarKey: SECRET_KEY}
