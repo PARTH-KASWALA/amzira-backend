@@ -171,10 +171,13 @@ def build_products_query(
             if subcat_ids:
                 query = query.filter(Product.subcategory_id.in_(subcat_ids))
 
+    requires_product_deduplication = False
+
     if occasion:
         occasions = _split_filter_values(occasion)
         if occasions:
             query = query.join(Product.occasions).filter(Occasion.slug.in_(occasions))
+            requires_product_deduplication = True
 
     if fabric:
         fabrics = _split_filter_values(fabric)
@@ -196,6 +199,7 @@ def build_products_query(
 
     if join_variants:
         query = query.join(Product.variants).filter(ProductVariant.is_active == True)
+        requires_product_deduplication = True
 
     if min_price is not None:
         query = query.filter(
@@ -223,7 +227,14 @@ def build_products_query(
     if in_stock_only:
         query = query.filter(Product.total_stock > 0)
 
-    return query.distinct()
+    # PostgreSQL's JSON type has no equality operator, so a blanket SELECT
+    # DISTINCT over every Product column fails once a JSON product attribute is
+    # added.  Only relationship joins can duplicate products; group by the
+    # primary key for those cases, which PostgreSQL can safely use to determine
+    # every other Product column.
+    if requires_product_deduplication:
+        return query.group_by(Product.id)
+    return query
 
 
 def apply_product_sort(query, sort_by: str | None):
