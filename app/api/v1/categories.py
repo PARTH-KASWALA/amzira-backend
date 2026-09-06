@@ -78,7 +78,7 @@ def get_public_categories(
 
     subcat_counts = dict(
         db.query(Product.subcategory_id, func.count(Product.id))
-        .filter(Product.subcategory_id.isnot(None))
+        .filter(Product.subcategory_id.isnot(None), Product.is_active == True)
         .group_by(Product.subcategory_id)
         .all()
     )

@@ -52,6 +52,10 @@ class ReviewMedia(Base):
     alt_text = Column(String(200), nullable=True)
     consent_reference = Column(String(250), nullable=False)
     display_order = Column(Integer, default=0, nullable=False)
+    # Customer-uploaded photos are private until an AMZIRA moderator approves
+    # them. Marketplace media is only made public by the explicit import
+    # publish action, never simply because the source review is visible.
+    is_published = Column(Boolean, default=False, nullable=False)
 
     review = relationship("Review", back_populates="media")
 

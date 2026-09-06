@@ -35,6 +35,7 @@ class ReviewMediaResponse(BaseModel):
     media_url: str
     alt_text: Optional[str]
     display_order: int
+    is_published: bool
 
     class Config:
         from_attributes = True
@@ -84,6 +85,12 @@ class MarketplaceReviewImport(BaseModel):
         if value is None:
             return value
         return bleach.clean(value, tags=[], attributes={}, strip=True).strip()
+
+
+class ReviewMediaModerationUpdate(BaseModel):
+    """Admin decision for a customer photo already stored by AMZIRA."""
+
+    publish: bool
 
 
 class ReviewResponse(BaseModel):

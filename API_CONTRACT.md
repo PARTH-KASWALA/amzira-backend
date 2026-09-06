@@ -400,6 +400,14 @@ Request:
 ### GET `/api/v1/reviews/product/{product_id}`
 Query params: `page`, `per_page`
 
+### POST `/api/v1/reviews/{review_id}/media` (Authenticated)
+Multipart form-data: `file` (JPG, PNG, or WebP) and `consent_to_publish=true`.
+
+Only the owner of a verified AMZIRA-purchase review can upload up to three photos. Photos are stored on AMZIRA-controlled media storage and remain private until an administrator moderates them.
+
+### DELETE `/api/v1/reviews/{review_id}/media/{media_id}` (Authenticated)
+Withdraws the reviewer's own customer photo and its associated publishing consent.
+
 ### PUT `/api/v1/reviews/{review_id}` (Authenticated)
 ### DELETE `/api/v1/reviews/{review_id}` (Authenticated)
 

@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+
+from fastapi import UploadFile
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session, selectinload
 from fastapi import HTTPException, status
@@ -15,6 +18,7 @@ from app.schemas.review import (
     ReviewUpdate,
 )
 from app.core.cache import invalidate_product_cache
+from app.utils.image_upload import delete_review_image, save_review_image
 
 
 class ReviewService:
@@ -60,7 +64,12 @@ class ReviewService:
         )
 
     @staticmethod
-    def _to_response(review: Review, user_name: str | None = None) -> ReviewResponse:
+    def _to_response(
+        review: Review,
+        user_name: str | None = None,
+        *,
+        include_unpublished_media: bool = False,
+    ) -> ReviewResponse:
         return ReviewResponse(
             id=review.id,
             user_id=review.user_id,
@@ -78,8 +87,10 @@ class ReviewService:
                     media_url=media.media_url,
                     alt_text=media.alt_text,
                     display_order=media.display_order,
+                    is_published=media.is_published,
                 )
                 for media in sorted(review.media, key=lambda item: (item.display_order, item.id))
+                if include_unpublished_media or media.is_published
             ],
         )
 
@@ -166,6 +177,7 @@ class ReviewService:
                     alt_text=media.alt_text,
                     consent_reference=media.consent_reference,
                     display_order=display_order,
+                    is_published=review_data.publish,
                 )
             )
 
@@ -175,6 +187,94 @@ class ReviewService:
         db.refresh(review)
         invalidate_product_cache()
         return ReviewService._to_response(review)
+
+    @staticmethod
+    def add_direct_review_media(
+        db: Session,
+        review_id: str,
+        user_id: int,
+        image: UploadFile,
+    ) -> ReviewResponse:
+        """Accept a verified purchaser's photo and hold it for moderation."""
+        review = (
+            db.query(Review)
+            .options(selectinload(Review.media))
+            .filter(Review.id == review_id)
+            .first()
+        )
+        if not review:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
+        if review.source != "amzira" or review.user_id != user_id or not review.verified_purchase:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only add photos to your verified AMZIRA review",
+            )
+        if len(review.media) >= 3:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A review can include up to three customer photos",
+            )
+
+        image_url = save_review_image(image)
+        review.media.append(
+            ReviewMedia(
+                media_url=image_url,
+                consent_reference=f"direct-review-upload:{review.id}:{datetime.now(timezone.utc).isoformat()}",
+                display_order=len(review.media),
+                is_published=False,
+            )
+        )
+        db.commit()
+        db.refresh(review)
+        user = db.query(User).filter(User.id == user_id).first()
+        return ReviewService._to_response(
+            review,
+            user.full_name if user else None,
+            include_unpublished_media=True,
+        )
+
+    @staticmethod
+    def moderate_review_media(db: Session, review_id: str, media_id: int, publish: bool) -> ReviewResponse:
+        """Publish or hide one customer photo without changing its review."""
+        review = (
+            db.query(Review)
+            .options(selectinload(Review.media))
+            .filter(Review.id == review_id)
+            .first()
+        )
+        if not review:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
+        media = next((item for item in review.media if item.id == media_id), None)
+        if not media:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review photo not found")
+        media.is_published = publish
+        db.commit()
+        db.refresh(review)
+        return ReviewService._to_response(review, include_unpublished_media=True)
+
+    @staticmethod
+    def delete_direct_review_media(db: Session, review_id: str, media_id: int, user_id: int) -> None:
+        """Let a reviewer withdraw their own customer photo and its consent."""
+        review = (
+            db.query(Review)
+            .options(selectinload(Review.media))
+            .filter(Review.id == review_id)
+            .first()
+        )
+        if not review:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
+        if review.source != "amzira" or review.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only withdraw photos from your own review",
+            )
+        media = next((item for item in review.media if item.id == media_id), None)
+        if not media:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review photo not found")
+        image_url = media.media_url
+        db.delete(media)
+        db.commit()
+        delete_review_image(image_url)
 
     @staticmethod
     def get_reviews_for_product(

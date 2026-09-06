@@ -38,7 +38,7 @@ def _build_r2_object_url(key: str) -> str:
     return f"{settings.R2_PUBLIC_URL.rstrip('/')}/{key}"
 
 
-def _upload_product_image_to_r2(data: bytes) -> str | None:
+def _upload_image_to_r2(data: bytes, prefix: str) -> str | None:
     client = _get_r2_client()
     if client is None:
         return None
@@ -50,7 +50,7 @@ def _upload_product_image_to_r2(data: bytes) -> str | None:
         img.save(output, format="WEBP", quality=85, optimize=True)
     output.seek(0)
 
-    key = f"products/{uuid.uuid4().hex}.webp"
+    key = f"{prefix}/{uuid.uuid4().hex}.webp"
     client.upload_fileobj(
         output,
         settings.R2_BUCKET_NAME,
@@ -61,6 +61,11 @@ def _upload_product_image_to_r2(data: bytes) -> str | None:
         },
     )
     return _build_r2_object_url(key)
+
+
+def _upload_product_image_to_r2(data: bytes) -> str | None:
+    """Compatibility wrapper for existing product-media imports."""
+    return _upload_image_to_r2(data, "products")
 
 
 def _extract_r2_key(image_path: str) -> str | None:
@@ -111,6 +116,42 @@ def validate_image_upload(file: UploadFile) -> tuple[bytes, str]:
         file.file.seek(0)
 
 
+def _validate_image_dimensions(data: bytes) -> None:
+    try:
+        img = Image.open(BytesIO(data))
+        img.verify()  # will raise if broken
+        width, height = img.size
+        # Prevent decompression bombs by limiting pixel count.
+        if width * height > 50_000_000:
+            raise HTTPException(status_code=400, detail="Image too large")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Invalid image upload: %s", exc)
+        raise HTTPException(status_code=400, detail="Invalid image file") from exc
+
+
+def _save_image(file: UploadFile, *, prefix: str, upload_dir: str) -> str:
+    data, file_extension = validate_image_upload(file)
+    _validate_image_dimensions(data)
+
+    remote_url = _upload_image_to_r2(data, prefix)
+    if remote_url:
+        return remote_url
+
+    # Fallback for local/dev environments.
+    os.makedirs(upload_dir, exist_ok=True)
+    unique_filename = f"{uuid.uuid4()}.{file_extension}"
+    file_path = os.path.join(upload_dir, unique_filename)
+    with open(file_path, "wb") as out:
+        out.write(data)
+    try:
+        optimize_image(file_path)
+    except Exception:
+        logger.exception("Image optimization failed for %s", file_path)
+    return f"/{file_path}"
+
+
 def save_product_image(file: UploadFile) -> str:
     """Save uploaded image safely and return public file path.
 
@@ -120,41 +161,12 @@ def save_product_image(file: UploadFile) -> str:
     - Validate actual image headers using Pillow
     - Never trust client filename
     """
-    data, file_extension = validate_image_upload(file)
+    return _save_image(file, prefix="products", upload_dir=settings.UPLOAD_DIR)
 
-    try:
-        img = Image.open(BytesIO(data))
-        img.verify()  # will raise if broken
-        width, height = img.size
-        # Prevent decompression bomb by limiting pixel count
-        if width * height > 50_000_000:
-            raise HTTPException(status_code=400, detail="Image too large")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Invalid image upload: %s", e)
-        raise HTTPException(status_code=400, detail="Invalid image file")
 
-    remote_url = _upload_product_image_to_r2(data)
-    if remote_url:
-        return remote_url
-
-    # Fallback for local/dev environments.
-    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-
-    # Save file with safe unique name
-    unique_filename = f"{uuid.uuid4()}.{file_extension}"
-    file_path = os.path.join(settings.UPLOAD_DIR, unique_filename)
-    with open(file_path, 'wb') as out:
-        out.write(data)
-
-    # Optionally optimize/resize
-    try:
-        optimize_image(file_path)
-    except Exception:
-        logger.exception("Image optimization failed for %s", file_path)
-
-    return f"/{file_path}"
+def save_review_image(file: UploadFile) -> str:
+    """Store a customer review photo in AMZIRA-controlled media storage."""
+    return _save_image(file, prefix="reviews", upload_dir="static/uploads/reviews")
 
 
 def optimize_image(file_path: str, max_width: int = 1200, quality: int = 85):
@@ -183,3 +195,8 @@ def delete_product_image(image_path: str):
             os.remove(path)
     except Exception:
         logger.exception("Error deleting image: %s", image_path)
+
+
+def delete_review_image(image_path: str):
+    """Delete a withdrawn or rejected review photo from managed storage."""
+    delete_product_image(image_path)

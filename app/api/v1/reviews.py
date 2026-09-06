@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -24,6 +24,39 @@ def create_review(
     """Create a new review for a product. Requires verified purchase."""
     review = ReviewService.create_review(db, current_user.id, review_data)
     return success(data=review.dict(), message="Review created successfully")
+
+
+@router.post("/{review_id}/media", response_model=dict)
+@limiter.limit("10/hour")
+def add_review_media(
+    request: Request,
+    review_id: str,
+    file: UploadFile = File(...),
+    consent_to_publish: bool = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Upload one customer photo for moderation after a verified AMZIRA review."""
+    _ = request
+    if not consent_to_publish:
+        raise HTTPException(status_code=422, detail="Consent is required before a customer photo can be reviewed")
+    review = ReviewService.add_direct_review_media(db, review_id, current_user.id, file)
+    return success(data=review.model_dump(mode="json"), message="Customer photo submitted for moderation")
+
+
+@router.delete("/{review_id}/media/{media_id}", response_model=dict)
+@limiter.limit("20/hour")
+def delete_review_media(
+    request: Request,
+    review_id: str,
+    media_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Withdraw a customer-uploaded review photo and its publishing consent."""
+    _ = request
+    ReviewService.delete_direct_review_media(db, review_id, media_id, current_user.id)
+    return success(message="Customer photo withdrawn")
 
 
 @router.get("/product/{product_id}", response_model=dict)

@@ -21,7 +21,7 @@ from app.models.order import Order, OrderStatus
 from app.models.payment import Payment, PaymentStatus
 from app.schemas.product import ProductCreate
 from app.schemas.catalog_import import CatalogImportRequest
-from app.schemas.review import MarketplaceReviewImport
+from app.schemas.review import MarketplaceReviewImport, ReviewMediaModerationUpdate
 from app.services.catalog_import_service import CatalogImportValidationError, import_catalog
 from app.services.review_service import ReviewService
 from app.services.order_service import auto_cancel_pending_orders
@@ -1494,6 +1494,25 @@ def marketplace_review_import(
     return success(
         data=review.model_dump(mode="json"),
         message="Marketplace review imported" if payload.publish else "Marketplace review saved for moderation",
+    )
+
+
+@router.patch("/reviews/{review_id}/media/{media_id}")
+@limiter.limit("60/hour")
+def moderate_review_media(
+    request: Request,
+    review_id: str,
+    media_id: int,
+    payload: ReviewMediaModerationUpdate,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin-only photo moderation for verified-customer review uploads."""
+    _ = request, current_admin
+    review = ReviewService.moderate_review_media(db, review_id, media_id, payload.publish)
+    return success(
+        data=review.model_dump(mode="json"),
+        message="Customer photo published" if payload.publish else "Customer photo hidden",
     )
 
 

@@ -1,9 +1,13 @@
 import pytest
+from io import BytesIO
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
+from starlette.datastructures import UploadFile
 
 from app.models.category import Category
 from app.models.product import Product
+from app.models.review import Review
+from app.models.user import User
 from app.schemas.review import MarketplaceReviewImport
 from app.services.review_service import ReviewService
 
@@ -56,6 +60,7 @@ def test_marketplace_review_import_keeps_source_and_media_consent(db_session: Se
     assert review.verified_purchase is False
     assert review.marketplace_verified_purchase is True
     assert review.media[0].media_url.endswith("42.webp")
+    assert review.media[0].is_published is True
     assert product.review_count == 1
     assert public.reviews[0].user_name == "Priya"
 
@@ -74,3 +79,46 @@ def test_marketplace_review_import_requires_ownership_and_reuse_confirmation():
             source_account_verified=False,
             review_reuse_authorized=True,
         )
+
+
+def test_direct_customer_photo_stays_private_until_moderated_and_can_be_withdrawn(db_session: Session, monkeypatch):
+    product = _product(db_session)
+    customer = User(
+        email="parent@example.com",
+        password_hash="not-used-in-service-test",
+        full_name="Parent Customer",
+    )
+    db_session.add(customer)
+    db_session.flush()
+    review = Review(
+        user_id=customer.id,
+        product_id=product.id,
+        rating=5,
+        comment="Great fit for a temple function.",
+        verified_purchase=True,
+        source="amzira",
+        is_published=True,
+    )
+    db_session.add(review)
+    db_session.commit()
+
+    deleted_urls: list[str] = []
+    monkeypatch.setattr(
+        "app.services.review_service.save_review_image",
+        lambda _: "https://cdn.amzira.com/reviews/customer-photo.webp",
+    )
+    monkeypatch.setattr("app.services.review_service.delete_review_image", deleted_urls.append)
+    upload = UploadFile(filename="customer-photo.webp", file=BytesIO(b"not-read-in-this-test"))
+
+    submitted = ReviewService.add_direct_review_media(db_session, review.id, customer.id, upload)
+    assert submitted.media[0].is_published is False
+    assert ReviewService.get_reviews_for_product(db_session, product.id).reviews[0].media == []
+
+    published = ReviewService.moderate_review_media(db_session, review.id, submitted.media[0].id, True)
+    assert published.media[0].is_published is True
+    public = ReviewService.get_reviews_for_product(db_session, product.id)
+    assert public.reviews[0].media[0].media_url.endswith("customer-photo.webp")
+
+    ReviewService.delete_direct_review_media(db_session, review.id, submitted.media[0].id, customer.id)
+    assert deleted_urls == ["https://cdn.amzira.com/reviews/customer-photo.webp"]
+    assert ReviewService.get_reviews_for_product(db_session, product.id).reviews[0].media == []
