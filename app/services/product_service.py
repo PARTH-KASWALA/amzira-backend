@@ -58,7 +58,7 @@ def build_products_count_cache_key(request: Request) -> str:
     filtered_params = [
         (key, value)
         for key, value in request.query_params.multi_items()
-        if key not in {"page", "limit", "sort_by"}
+        if key not in {"page", "limit"}
     ]
     filtered_params.sort()
     encoded = urlencode(filtered_params, doseq=True)
@@ -271,7 +271,7 @@ def get_cached_product_count(request: Request, query) -> int:
     # fields such as ``included_pieces`` do not have an equality operator.
     # Count the stable primary key instead, which also keeps joined filters
     # from inflating the result.
-    total = query.order_by(None).with_entities(func.count(func.distinct(Product.id))).scalar() or 0
+    total = query.order_by(None).with_entities(Product.id).distinct().count()
     cache_set_json(count_cache_key, total, ttl_seconds=PRODUCT_COUNT_CACHE_TTL_SECONDS)
     return int(total)
 
@@ -353,9 +353,9 @@ def list_products(
     if cached:
         return cached
 
-    query = build_products_query(db, **filters)
+    query = apply_product_sort(build_products_query(db, **filters), sort_by)
     total = get_cached_product_count(request, query)
-    products = apply_product_sort(query, sort_by).offset((page - 1) * limit).limit(limit).all()
+    products = query.offset((page - 1) * limit).limit(limit).all()
 
     response = {
         "total": total,

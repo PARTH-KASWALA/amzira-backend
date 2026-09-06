@@ -296,3 +296,23 @@ def test_product_list_parent_category_includes_child_products(client: TestClient
     assert response.status_code == 200
     products = response.json()["data"]["products"]
     assert [product["slug"] for product in products] == ["kids-pattu-pavadai"]
+
+
+def test_bestseller_view_counts_only_bestseller_products(client: TestClient, db_session: Session):
+    product = _create_product_with_images(db_session)
+
+    response = client.get("/api/v1/products?sort_by=bestseller")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total"] == 0
+    assert data["products"] == []
+
+    product.is_bestseller = True
+    db_session.commit()
+
+    response = client.get("/api/v1/products?sort_by=bestseller")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total"] == 1
+    assert [item["slug"] for item in data["products"]] == [product.slug]
