@@ -254,7 +254,13 @@ def get_cached_product_count(request: Request, query) -> int:
     if total is not None:
         return int(total)
 
-    total = query.order_by(None).count()
+    # The product query is DISTINCT because occasion, colour, and size filters
+    # may join a product to more than one related row.  Counting that complete
+    # product select asks PostgreSQL to compare every selected column; JSON
+    # fields such as ``included_pieces`` do not have an equality operator.
+    # Count the stable primary key instead, which also keeps joined filters
+    # from inflating the result.
+    total = query.order_by(None).with_entities(func.count(func.distinct(Product.id))).scalar() or 0
     cache_set_json(count_cache_key, total, ttl_seconds=PRODUCT_COUNT_CACHE_TTL_SECONDS)
     return int(total)
 
