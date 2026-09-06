@@ -53,7 +53,7 @@ def get_products(
     featured: Optional[bool] = None,
     is_featured: Optional[bool] = Query(None, alias="is_featured"),
     in_stock_only: Optional[bool] = Query(None, alias="in_stock_only"),
-    sort_by: Optional[str] = Query(None, regex="^(price_asc|price_desc|newest|popular|bestseller|top_rated)$"),
+    sort_by: Optional[str] = Query(None, regex="^(price_asc|price_desc|newest|popular|bestseller|top_rated|marketplace)$"),
     db: Session = Depends(get_db)
 ):
     """

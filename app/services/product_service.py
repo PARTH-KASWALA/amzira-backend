@@ -276,6 +276,12 @@ def apply_product_sort(query, sort_by: str | None):
         return query.filter(Product.is_bestseller == True).order_by(Product.id.desc())
     if sort_by == "top_rated":
         return query.order_by(Product.avg_rating.desc(), Product.review_count.desc(), Product.id.desc())
+    if sort_by == "marketplace":
+        return query.order_by(
+            Product.marketplace_signal_observed_at.desc().nullslast(),
+            Product.marketplace_signal_units.desc().nullslast(),
+            Product.id.desc(),
+        )
     return query.order_by(Product.id.desc())
 
 

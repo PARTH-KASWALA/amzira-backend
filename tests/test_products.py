@@ -7,10 +7,11 @@ from app.models.category import Category
 from app.models.product import Product, ProductImage, ProductVariant
 
 
-def _create_product_with_images(db: Session) -> Product:
+def _create_product_with_images(db: Session, product_slug: str = "sherwani-01") -> Product:
+    category_slug = "men" if product_slug == "sherwani-01" else f"men-{product_slug}"
     category = Category(
-        name="Men",
-        slug="men",
+        name="Men" if product_slug == "sherwani-01" else f"Men {product_slug}",
+        slug=category_slug,
         is_active=True,
     )
     db.add(category)
@@ -19,7 +20,7 @@ def _create_product_with_images(db: Session) -> Product:
     product = Product(
         category_id=category.id,
         name="Sherwani 01",
-        slug="sherwani-01",
+        slug=product_slug,
         description="Test product",
         base_price=1000.0,
         sale_price=None,
@@ -58,7 +59,7 @@ def _create_product_with_images(db: Session) -> Product:
             product_id=product.id,
             size="M",
             color="Maroon",
-            sku="AMZ-TEST-M-MAROON",
+            sku="AMZ-TEST-M-MAROON" if product_slug == "sherwani-01" else f"AMZ-TEST-{product_slug.upper()}-M-MAROON",
             stock_quantity=3,
             is_active=True,
         )
@@ -328,3 +329,19 @@ def test_bestseller_view_counts_only_bestseller_products(client: TestClient, db_
     data = response.json()["data"]
     assert data["total"] == 1
     assert [item["slug"] for item in data["products"]] == [product.slug]
+
+
+def test_marketplace_sort_prioritizes_observed_sales_signals(client: TestClient, db_session: Session):
+    older = _create_product_with_images(db_session)
+    newer = _create_product_with_images(db_session, product_slug="marketplace-newer")
+    older.marketplace_signal_observed_at = datetime(2026, 9, 5, 14, 0, 0)
+    older.marketplace_signal_units = 10
+    newer.marketplace_signal_observed_at = datetime(2026, 9, 6, 14, 0, 0)
+    newer.marketplace_signal_units = 1
+    db_session.commit()
+
+    response = client.get("/api/v1/products?sort_by=marketplace")
+
+    assert response.status_code == 200
+    products = response.json()["data"]["products"]
+    assert [product["slug"] for product in products[:2]] == [newer.slug, older.slug]
