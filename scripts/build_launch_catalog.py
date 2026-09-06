@@ -95,14 +95,20 @@ PRODUCTS = [
 CSV_HEADERS = [
     "product_slug", "name", "category_slug", "subcategory_slug", "base_price", "sale_price",
     "description", "fabric", "care_instructions", "meta_title", "meta_description", "audience",
-    "collection", "tags", "status", "is_featured", "is_bestseller", "is_new_arrival",
+    "lining", "included_pieces", "age_recommendation", "fit_note", "dispatch_days_min",
+    "dispatch_days_max", "is_exchange_eligible", "is_return_eligible", "return_window_hours",
+    "collection", "tags", "status", "is_featured", "is_bestseller", "is_most_loved", "is_new_arrival",
     "occasion_slugs", "image_urls", "sku", "size", "color", "stock_quantity", "additional_price",
-    "variant_is_active", "external_source", "external_id", "style_code",
+    "variant_is_active", "variant_measurements_json", "external_source", "external_id", "style_code",
 ]
 
 
 def slugify(value: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", value.lower())).strip("-")
+
+
+def search_friendly_name(style_name: str, fabric: str) -> str:
+    return f"{style_name} in {fabric} for Girls (1-10Y) - Wedding & Festive"
 
 
 def product_images(folder: Path) -> list[Path]:
@@ -150,7 +156,10 @@ def build() -> None:
         folder = INVENTORY_ROOT / INVENTORY_FOLDER_MAP.get(relative_folder, relative_folder)
         if not folder.is_dir():
             raise FileNotFoundError(folder)
-        slug = slugify(name)
+        style_name = name
+        fabric = "Art Silk Jacquard" if "Work" in relative_folder else "Silk Blend"
+        product_name = search_friendly_name(style_name, fabric)
+        slug = slugify(style_name)
         images = product_images(folder)
         if not images:
             raise ValueError(f"No launch images found for {relative_folder}")
@@ -162,7 +171,7 @@ def build() -> None:
             image_urls.append(url)
             image_payloads.append({
                 "image_url": url,
-                "alt_text": f"{name} - view {order}",
+                "alt_text": f"{product_name} - view {order}",
                 "display_order": order - 1,
                 "is_primary": order == 1,
             })
@@ -181,28 +190,37 @@ def build() -> None:
             "Designed for festivals, weddings, temple ceremonies and family celebrations. "
             "The set includes one choli and one lehenga."
         )
-        fabric = "Art Silk Jacquard" if "Work" in relative_folder else "Silk Blend"
         collection = "AMZIRA Heritage Work" if "Work" in relative_folder else "AMZIRA Haresh Butta"
         subcategory = "south-indian-lehenga-choli" if category == "girls-lehenga-choli" else ""
         common = {
             "product_slug": slug,
-            "name": name,
+            "name": product_name,
             "category_slug": category,
             "subcategory_slug": subcategory,
             "base_price": f"{mrp:.2f}",
             "sale_price": f"{sale_price:.2f}",
             "description": description,
             "fabric": fabric,
+            "lining": "Comfortable lining",
+            "included_pieces": "Choli|Lehenga",
+            "age_recommendation": "1-10Y",
+            "fit_note": "Compare the garment measurements with a well-fitting outfit before ordering.",
+            "dispatch_days_min": "",
+            "dispatch_days_max": "",
+            "is_exchange_eligible": "",
+            "is_return_eligible": "",
+            "return_window_hours": "",
             "care_instructions": "Dry clean recommended. Store folded in a cool, dry place.",
-            "meta_title": f"{name} for Girls | AMZIRA"[:100],
-            "meta_description": f"Shop {name}, a ready-to-wear South Indian festive lehenga choli for girls aged 0-10 years."[:300],
+            "meta_title": f"{product_name} | AMZIRA"[:100],
+            "meta_description": f"Shop {product_name}, a ready-to-wear South Indian festive set with traditional woven detail."[:300],
             "audience": "kids_girls",
             "collection": collection,
             "tags": "girls-lehenga-choli|south-indian|pattu-pavadai|festive|ready-to-wear",
             "status": "active",
             "is_featured": str(index < 6).lower(),
             "is_bestseller": "false",
-            "is_new_arrival": "true",
+            "is_most_loved": "false",
+            "is_new_arrival": "false",
             "occasion_slugs": "festival|wedding|temple-ceremony|birthday",
             "image_urls": "|".join(image_urls),
             "external_source": "amzira_local_inventory",
@@ -222,6 +240,7 @@ def build() -> None:
                 "stock_quantity": quantity,
                 "additional_price": "0.00",
                 "is_active": True,
+                "measurements": None,
             }
             variants.append(variant)
             rows.append({
@@ -232,9 +251,10 @@ def build() -> None:
                 "stock_quantity": quantity,
                 "additional_price": "0.00",
                 "variant_is_active": "true",
+                "variant_measurements_json": "",
             })
         products_json.append({
-            "name": name,
+            "name": product_name,
             "slug": slug,
             "category_slug": category,
             "subcategory_slug": subcategory or None,
@@ -242,6 +262,10 @@ def build() -> None:
             "sale_price": str(sale_price),
             "description": description,
             "fabric": fabric,
+            "lining": common["lining"],
+            "included_pieces": common["included_pieces"].split("|"),
+            "age_recommendation": common["age_recommendation"],
+            "fit_note": common["fit_note"],
             "care_instructions": common["care_instructions"],
             "meta_title": common["meta_title"],
             "meta_description": common["meta_description"],
@@ -251,7 +275,8 @@ def build() -> None:
             "status": "active",
             "is_featured": index < 6,
             "is_bestseller": False,
-            "is_new_arrival": True,
+            "is_most_loved": False,
+            "is_new_arrival": False,
             "occasion_slugs": common["occasion_slugs"].split("|"),
             "images": image_payloads,
             "variants": variants,

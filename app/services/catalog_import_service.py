@@ -158,7 +158,16 @@ def _apply_product(
     product.discount_percentage = int(discount)
     product.description = item.description
     product.fabric = item.fabric
+    product.lining = item.lining
+    product.included_pieces = item.included_pieces or None
+    product.age_recommendation = item.age_recommendation
+    product.fit_note = item.fit_note
     product.care_instructions = item.care_instructions
+    product.dispatch_days_min = item.dispatch_days_min
+    product.dispatch_days_max = item.dispatch_days_max
+    product.is_exchange_eligible = item.is_exchange_eligible
+    product.is_return_eligible = item.is_return_eligible
+    product.return_window_hours = item.return_window_hours
     product.meta_title = item.meta_title
     product.meta_description = item.meta_description
     product.audience = item.audience
@@ -168,6 +177,7 @@ def _apply_product(
     product.is_active = item.status == "active"
     product.is_featured = item.is_featured
     product.is_bestseller = item.is_bestseller
+    product.is_most_loved = item.is_most_loved
     product.is_new_arrival = item.is_new_arrival
     product.external_source = item.external_source
     product.external_id = item.external_id
@@ -206,6 +216,7 @@ def _apply_product(
         variant.stock_quantity = variant_payload.stock_quantity
         variant.additional_price = variant_payload.additional_price
         variant.is_active = variant_payload.is_active
+        variant.measurements = variant_payload.measurements
 
     for sku, variant in variants_by_sku.items():
         if sku not in supplied_skus:
@@ -258,4 +269,3 @@ def import_catalog(db: Session, payload: CatalogImportRequest) -> dict:
 
     report["changed_slugs"] = changed_slugs
     return report
-

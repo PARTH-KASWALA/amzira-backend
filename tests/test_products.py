@@ -107,6 +107,16 @@ def test_product_detail_includes_rating_stock_and_variant_sku(client: TestClient
     product = _create_product_with_images(db_session)
     product.avg_rating = 4.7
     product.review_count = 12
+    product.lining = "Breathable cotton lining"
+    product.included_pieces = ["Choli", "Lehenga"]
+    product.age_recommendation = "6-7Y"
+    product.fit_note = "Use garment measurements before ordering."
+    product.dispatch_days_min = 1
+    product.dispatch_days_max = 2
+    product.is_exchange_eligible = True
+    product.is_return_eligible = True
+    product.return_window_hours = 36
+    product.variants[0].measurements = {"chest": "14 in", "lehenga_length": "27 in"}
     db_session.commit()
 
     response = client.get(f"/api/v1/products/{product.slug}")
@@ -117,6 +127,12 @@ def test_product_detail_includes_rating_stock_and_variant_sku(client: TestClient
     assert data["review_count"] == 12
     assert data["total_stock"] == 3
     assert data["variants"][0]["sku"] == "AMZ-TEST-M-MAROON"
+    assert data["lining"] == "Breathable cotton lining"
+    assert data["included_pieces"] == ["Choli", "Lehenga"]
+    assert data["dispatch_days_min"] == 1
+    assert data["is_exchange_eligible"] is True
+    assert data["variants"][0]["measurements"]["lehenga_length"] == "27 in"
+    assert data["shipping_rate"] == 100.0
 
 
 def test_delivery_estimate_endpoint_returns_shipping_and_dates(client: TestClient, db_session: Session):

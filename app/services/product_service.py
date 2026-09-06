@@ -234,7 +234,17 @@ def apply_product_sort(query, sort_by: str | None):
     if sort_by == "newest":
         return query.order_by(Product.created_at.desc())
     if sort_by == "popular":
-        return query.order_by(Product.review_count.desc(), Product.avg_rating.desc(), Product.id.desc())
+        return query.order_by(
+            Product.is_bestseller.desc(),
+            Product.is_most_loved.desc(),
+            Product.review_count.desc(),
+            Product.avg_rating.desc(),
+            Product.id.desc(),
+        )
+    if sort_by == "bestseller":
+        return query.filter(Product.is_bestseller == True).order_by(Product.id.desc())
+    if sort_by == "top_rated":
+        return query.order_by(Product.avg_rating.desc(), Product.review_count.desc(), Product.id.desc())
     return query.order_by(Product.id.desc())
 
 
@@ -278,6 +288,7 @@ def serialize_product_summary(product: Product) -> dict:
         "discount_percentage": product.discount_percentage,
         "is_featured": product.is_featured,
         "is_bestseller": product.is_bestseller,
+        "is_most_loved": product.is_most_loved,
         "is_new_arrival": product.is_new_arrival,
         "collection": product.collection,
         "tags": _deserialize_tags(product.tags),
@@ -296,6 +307,15 @@ def serialize_product_summary(product: Product) -> dict:
         "primary_image": primary_image,
         "in_stock": stock_quantity > 0,
         "fabric": product.fabric,
+        "lining": product.lining,
+        "included_pieces": product.included_pieces or [],
+        "age_recommendation": product.age_recommendation,
+        "fit_note": product.fit_note,
+        "dispatch_days_min": product.dispatch_days_min,
+        "dispatch_days_max": product.dispatch_days_max,
+        "is_exchange_eligible": product.is_exchange_eligible,
+        "is_return_eligible": product.is_return_eligible,
+        "return_window_hours": product.return_window_hours,
         "colors": sorted({variant.color for variant in active_variants if variant.color}),
         "sizes": sorted({variant.size for variant in active_variants if variant.size}),
         "occasions": [occ.slug for occ in product.occasions],
@@ -331,7 +351,13 @@ def list_products(
     return response
 
 
-def get_product_detail(db: Session, *, slug: str) -> dict:
+def get_product_detail(
+    db: Session,
+    *,
+    slug: str,
+    free_shipping_threshold: float | None = None,
+    default_shipping_charge: float | None = None,
+) -> dict:
     cache_key = f"cache:products:detail:{slug}"
     cached = cache_get_json(cache_key)
     if cached:
@@ -353,6 +379,10 @@ def get_product_detail(db: Session, *, slug: str) -> dict:
         raise ProductNotFound()
 
     primary_image = _primary_image_url(product.images)
+    current_price = product.sale_price if product.sale_price is not None else product.base_price
+    shipping_rate = None
+    if free_shipping_threshold is not None and default_shipping_charge is not None:
+        shipping_rate = 0.0 if current_price >= free_shipping_threshold else default_shipping_charge
 
     data = {
         "id": product.id,
@@ -364,6 +394,7 @@ def get_product_detail(db: Session, *, slug: str) -> dict:
         "discount_percentage": product.discount_percentage,
         "is_featured": product.is_featured,
         "is_bestseller": product.is_bestseller,
+        "is_most_loved": product.is_most_loved,
         "is_new_arrival": product.is_new_arrival,
         "collection": product.collection,
         "tags": _deserialize_tags(product.tags),
@@ -371,7 +402,17 @@ def get_product_detail(db: Session, *, slug: str) -> dict:
         "avg_rating": product.avg_rating,
         "review_count": product.review_count,
         "fabric": product.fabric,
+        "lining": product.lining,
+        "included_pieces": product.included_pieces or [],
+        "age_recommendation": product.age_recommendation,
+        "fit_note": product.fit_note,
         "care_instructions": product.care_instructions,
+        "dispatch_days_min": product.dispatch_days_min,
+        "dispatch_days_max": product.dispatch_days_max,
+        "is_exchange_eligible": product.is_exchange_eligible,
+        "is_return_eligible": product.is_return_eligible,
+        "return_window_hours": product.return_window_hours,
+        "shipping_rate": shipping_rate,
         "category": {
             "id": product.category.id,
             "name": product.category.name,
@@ -403,6 +444,7 @@ def get_product_detail(db: Session, *, slug: str) -> dict:
                 "stock_quantity": variant.stock_quantity,
                 "additional_price": variant.additional_price,
                 "is_active": variant.is_active,
+                "measurements": variant.measurements,
             }
             for variant in product.variants if variant.is_active
         ],

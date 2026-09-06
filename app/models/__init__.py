@@ -6,7 +6,7 @@ from app.models.order import Order, OrderItem, OrderStatus
 from app.models.address import Address
 from app.models.payment import Payment, PaymentStatus, PaymentMethod
 from app.models.checkout_payment_intent import CheckoutPaymentIntent, CheckoutPaymentIntentStatus
-from app.models.review import Review
+from app.models.review import Review, ReviewMedia
 from app.models.wishlist import Wishlist
 from app.models.coupon import Coupon
 from app.models.coupon_usage import CouponUsage

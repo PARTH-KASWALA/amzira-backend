@@ -21,7 +21,9 @@ from app.models.order import Order, OrderStatus
 from app.models.payment import Payment, PaymentStatus
 from app.schemas.product import ProductCreate
 from app.schemas.catalog_import import CatalogImportRequest
+from app.schemas.review import MarketplaceReviewImport
 from app.services.catalog_import_service import CatalogImportValidationError, import_catalog
+from app.services.review_service import ReviewService
 from app.services.order_service import auto_cancel_pending_orders
 from app.schemas.order_tracking import OrderStatusUpdate
 from app.services.order_tracking_service import ALLOWED_STATUS_TRANSITIONS, OrderTrackingService
@@ -51,10 +53,12 @@ BULK_UPLOAD_HEADERS = [
 CATALOG_IMPORT_HEADERS = [
     "product_slug", "name", "category_slug", "subcategory_slug", "base_price",
     "sale_price", "description", "fabric", "care_instructions", "meta_title",
-    "meta_description", "audience", "collection", "tags", "status", "is_featured",
-    "is_bestseller", "is_new_arrival", "occasion_slugs", "image_urls", "sku",
+    "meta_description", "lining", "included_pieces", "age_recommendation", "fit_note",
+    "dispatch_days_min", "dispatch_days_max", "is_exchange_eligible", "is_return_eligible",
+    "return_window_hours", "audience", "collection", "tags", "status", "is_featured",
+    "is_bestseller", "is_most_loved", "is_new_arrival", "occasion_slugs", "image_urls", "sku",
     "size", "color", "stock_quantity", "additional_price", "variant_is_active",
-    "external_source", "external_id", "style_code",
+    "variant_measurements_json", "external_source", "external_id", "style_code",
 ]
 MAX_CATALOG_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_XLSX_ENTRIES = 100
@@ -106,11 +110,24 @@ def _parse_optional_float(value: str | None) -> float | None:
     return float(raw)
 
 
-def _parse_optional_int(value: str | None, default: int = 0) -> int:
+def _parse_optional_int(value: str | None, default: int | None = 0) -> int | None:
     raw = str(value or "").strip()
     if not raw:
         return default
     return int(raw)
+
+
+def _parse_optional_json_object(value: str | None) -> dict[str, str] | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="variant_measurements_json must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail="variant_measurements_json must be a JSON object")
+    return {str(key): str(measurement) for key, measurement in parsed.items()}
 
 
 def _parse_pipe_list(value: str | None) -> list[str]:
@@ -164,6 +181,7 @@ def _catalog_request_from_csv(content: bytes, *, mode: str, dry_run: bool) -> Ca
                     "stock_quantity": stock_quantity,
                     "additional_price": row.get("additional_price") or "0",
                     "is_active": _parse_bool(row.get("variant_is_active")) if str(row.get("variant_is_active") or "").strip() else True,
+                    "measurements": _parse_optional_json_object(row.get("variant_measurements_json")),
                 }
             )
 
@@ -178,7 +196,16 @@ def _catalog_request_from_csv(content: bytes, *, mode: str, dry_run: bool) -> Ca
                 "sale_price": first.get("sale_price") or None,
                 "description": first.get("description") or None,
                 "fabric": first.get("fabric") or None,
+                "lining": first.get("lining") or None,
+                "included_pieces": _parse_pipe_list(first.get("included_pieces")),
+                "age_recommendation": first.get("age_recommendation") or None,
+                "fit_note": first.get("fit_note") or None,
                 "care_instructions": first.get("care_instructions") or None,
+                "dispatch_days_min": _parse_optional_int(first.get("dispatch_days_min"), default=None) if str(first.get("dispatch_days_min") or "").strip() else None,
+                "dispatch_days_max": _parse_optional_int(first.get("dispatch_days_max"), default=None) if str(first.get("dispatch_days_max") or "").strip() else None,
+                "is_exchange_eligible": _parse_bool(first.get("is_exchange_eligible")) if str(first.get("is_exchange_eligible") or "").strip() else None,
+                "is_return_eligible": _parse_bool(first.get("is_return_eligible")) if str(first.get("is_return_eligible") or "").strip() else None,
+                "return_window_hours": _parse_optional_int(first.get("return_window_hours"), default=None) if str(first.get("return_window_hours") or "").strip() else None,
                 "meta_title": first.get("meta_title") or None,
                 "meta_description": first.get("meta_description") or None,
                 "audience": first.get("audience") or "kids_girls",
@@ -187,6 +214,7 @@ def _catalog_request_from_csv(content: bytes, *, mode: str, dry_run: bool) -> Ca
                 "status": first.get("status") or "active",
                 "is_featured": _parse_bool(first.get("is_featured")),
                 "is_bestseller": _parse_bool(first.get("is_bestseller")),
+                "is_most_loved": _parse_bool(first.get("is_most_loved")),
                 "is_new_arrival": _parse_bool(first.get("is_new_arrival")),
                 "occasion_slugs": _parse_pipe_list(first.get("occasion_slugs")),
                 "images": [
@@ -1450,6 +1478,23 @@ def catalog_import_json(
     if not payload.dry_run:
         invalidate_product_cache(slugs=report.get("changed_slugs"))
     return success(data=report, message="Catalog dry run passed" if payload.dry_run else "Catalog imported atomically")
+
+
+@router.post("/reviews/marketplace-import")
+@limiter.limit("30/hour")
+def marketplace_review_import(
+    request: Request,
+    payload: MarketplaceReviewImport,
+    current_admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin-only moderated import for rights-cleared Myntra/Flipkart evidence."""
+    _ = request, current_admin
+    review = ReviewService.import_marketplace_review(db, payload)
+    return success(
+        data=review.model_dump(mode="json"),
+        message="Marketplace review imported" if payload.publish else "Marketplace review saved for moderation",
+    )
 
 
 @router.post("/products/catalog-import")

@@ -7,6 +7,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     literal_column,
     Numeric,
     String,
@@ -65,6 +66,7 @@ class Product(Base):
     is_featured = Column(Boolean, default=False)
     catalog_status = Column(String(20), default="active", nullable=False)
     is_bestseller = Column(Boolean, default=False, nullable=False)
+    is_most_loved = Column(Boolean, default=False, nullable=False)
     is_new_arrival = Column(Boolean, default=False, nullable=False)
     
     # Ratings
@@ -77,7 +79,19 @@ class Product(Base):
     
     # Fabric & Care
     fabric = Column(String(100))
+    lining = Column(String(200))
+    included_pieces = Column(JSON, nullable=True)
+    age_recommendation = Column(String(100))
+    fit_note = Column(Text)
     care_instructions = Column(Text)
+
+    # Fulfilment and policy facts. Nullable means the product has not yet been
+    # verified; the storefront must not make a generic promise in that case.
+    dispatch_days_min = Column(Integer, nullable=True)
+    dispatch_days_max = Column(Integer, nullable=True)
+    is_exchange_eligible = Column(Boolean, nullable=True)
+    is_return_eligible = Column(Boolean, nullable=True)
+    return_window_hours = Column(Integer, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -162,6 +176,7 @@ class ProductVariant(Base):
     
     stock_quantity = Column(Integer, default=0, nullable=False)
     additional_price = Column(Numeric(10, 2), default=0.0)  # Extra cost for this variant
+    measurements = Column(JSON, nullable=True)
     
     is_active = Column(Boolean, default=True)
 

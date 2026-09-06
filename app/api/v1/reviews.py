@@ -33,10 +33,11 @@ def get_product_reviews(
     product_id: int,
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=50),
+    rating: Optional[int] = Query(None, ge=1, le=5),
     db: Session = Depends(get_db)
 ):
     """Get paginated reviews for a product. Public endpoint."""
-    result = ReviewService.get_reviews_for_product(db, product_id, page, per_page)
+    result = ReviewService.get_reviews_for_product(db, product_id, page, per_page, rating=rating)
     return success(data=result.dict(), message="Reviews retrieved successfully")
 
 

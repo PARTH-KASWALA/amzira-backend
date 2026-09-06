@@ -53,7 +53,7 @@ def get_products(
     featured: Optional[bool] = None,
     is_featured: Optional[bool] = Query(None, alias="is_featured"),
     in_stock_only: Optional[bool] = Query(None, alias="in_stock_only"),
-    sort_by: Optional[str] = Query(None, regex="^(price_asc|price_desc|newest|popular)$"),
+    sort_by: Optional[str] = Query(None, regex="^(price_asc|price_desc|newest|popular|bestseller|top_rated)$"),
     db: Session = Depends(get_db)
 ):
     """
@@ -118,7 +118,12 @@ def get_products_by_occasion(
 def get_product_detail(request: Request, slug: str, db: Session = Depends(get_db)):
     """Get product details by slug."""
     response = success(
-        data=service_get_product_detail(db, slug=slug),
+        data=service_get_product_detail(
+            db,
+            slug=slug,
+            free_shipping_threshold=FREE_SHIPPING_THRESHOLD,
+            default_shipping_charge=DEFAULT_SHIPPING_CHARGE,
+        ),
         message="Product retrieved",
     )
     return response

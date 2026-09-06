@@ -23,9 +23,11 @@ LOCAL_MEDIA_BASE = "http://localhost:8000/static/uploads/products/catalog"
 CSV_HEADERS = [
     "product_slug", "name", "category_slug", "subcategory_slug", "base_price", "sale_price",
     "description", "fabric", "care_instructions", "meta_title", "meta_description", "audience",
-    "collection", "tags", "status", "is_featured", "is_bestseller", "is_new_arrival",
+    "lining", "included_pieces", "age_recommendation", "fit_note", "dispatch_days_min",
+    "dispatch_days_max", "is_exchange_eligible", "is_return_eligible", "return_window_hours",
+    "collection", "tags", "status", "is_featured", "is_bestseller", "is_most_loved", "is_new_arrival",
     "occasion_slugs", "image_urls", "sku", "size", "color", "stock_quantity", "additional_price",
-    "variant_is_active", "external_source", "external_id", "style_code",
+    "variant_is_active", "variant_measurements_json", "external_source", "external_id", "style_code",
 ]
 
 
@@ -174,6 +176,11 @@ def color_from_style_code(style_code: str) -> str:
     return " / ".join(colors) if colors else "Heritage Multi"
 
 
+def search_friendly_name(style_name: str, fabric: str) -> str:
+    """Keep color/style detail and add fabric, age range, and occasion intent."""
+    return f"{style_name} in {fabric} for Girls (1-10Y) - Wedding & Festive"
+
+
 def generated_products() -> list[tuple[str, Family]]:
     products: list[tuple[str, Family]] = []
     for family_name, config in FAMILIES.items():
@@ -203,7 +210,9 @@ def product_payload(
     featured: bool,
 ) -> tuple[dict, list[dict], list[dict]]:
     folder = INVENTORY_ROOT / relative_folder
-    slug = slugify(name)
+    style_name = name
+    product_name = search_friendly_name(style_name, fabric)
+    slug = slugify(style_name)
     image_payloads = []
     media_rows = []
     image_urls = []
@@ -213,7 +222,7 @@ def product_payload(
         image_urls.append(image_url)
         image_payloads.append({
             "image_url": image_url,
-            "alt_text": f"{name} - view {order}",
+            "alt_text": f"{product_name} - view {order}",
             "display_order": order - 1,
             "is_primary": order == 1,
         })
@@ -227,30 +236,40 @@ def product_payload(
         })
 
     description = (
-        f"A ready-to-wear South Indian {name.split(' ', 1)[1]} for girls in {color.lower()}, "
+        f"A ready-to-wear South Indian {style_name.split(' ', 1)[1]} for girls in {color.lower()}, "
         f"finished with {motif}. Designed with a comfortable lining and celebration-friendly flare "
         "for weddings, festivals, birthdays, temple ceremonies and family gatherings. "
         "The coordinated set includes one choli and one lehenga."
     )
     common = {
         "product_slug": slug,
-        "name": name,
+        "name": product_name,
         "category_slug": category,
         "subcategory_slug": subcategory,
         "base_price": f"{base_price:.2f}",
         "sale_price": f"{sale_price:.2f}",
         "description": description,
         "fabric": fabric,
+        "lining": "Comfortable lining",
+        "included_pieces": "Choli|Lehenga",
+        "age_recommendation": "1-10Y",
+        "fit_note": "Compare the garment measurements with a well-fitting outfit before ordering.",
+        "dispatch_days_min": "",
+        "dispatch_days_max": "",
+        "is_exchange_eligible": "",
+        "is_return_eligible": "",
+        "return_window_hours": "",
         "care_instructions": "Dry clean recommended. Store folded in a cool, dry place away from direct sunlight.",
-        "meta_title": f"{name} for Girls | AMZIRA"[:100],
-        "meta_description": f"Shop {name}, a ready-to-wear South Indian festive set for girls aged 1-10 years."[:300],
+        "meta_title": f"{product_name} | AMZIRA"[:100],
+        "meta_description": f"Shop {product_name}, a ready-to-wear South Indian festive set with a traditional border."[:300],
         "audience": "kids_girls",
         "collection": collection,
         "tags": "|".join((category, subcategory, "south-indian", "festive", "ready-to-wear")),
         "status": "active",
         "is_featured": str(featured).lower(),
         "is_bestseller": "false",
-        "is_new_arrival": "true",
+        "is_most_loved": "false",
+        "is_new_arrival": "false",
         "occasion_slugs": "festival|wedding|temple-ceremony|birthday",
         "image_urls": "|".join(image_urls),
         "external_source": "amzira_local_inventory",
@@ -268,6 +287,7 @@ def product_payload(
             "stock_quantity": quantity,
             "additional_price": "0.00",
             "is_active": True,
+            "measurements": None,
         })
         csv_rows.append({
             **common,
@@ -277,10 +297,11 @@ def product_payload(
             "stock_quantity": quantity,
             "additional_price": "0.00",
             "variant_is_active": "true",
+            "variant_measurements_json": "",
         })
 
     product = {
-        "name": name,
+        "name": product_name,
         "slug": slug,
         "category_slug": category,
         "subcategory_slug": subcategory,
@@ -288,6 +309,10 @@ def product_payload(
         "sale_price": str(sale_price),
         "description": description,
         "fabric": fabric,
+        "lining": common["lining"],
+        "included_pieces": common["included_pieces"].split("|"),
+        "age_recommendation": common["age_recommendation"],
+        "fit_note": common["fit_note"],
         "care_instructions": common["care_instructions"],
         "meta_title": common["meta_title"],
         "meta_description": common["meta_description"],
@@ -297,7 +322,8 @@ def product_payload(
         "status": "active",
         "is_featured": featured,
         "is_bestseller": False,
-        "is_new_arrival": True,
+        "is_most_loved": False,
+        "is_new_arrival": False,
         "occasion_slugs": common["occasion_slugs"].split("|"),
         "images": image_payloads,
         "variants": variants,
