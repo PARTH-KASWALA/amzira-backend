@@ -86,3 +86,4 @@ def invalidate_product_cache(slugs: Iterable[str] | None = None) -> None:
     for slug in slugs:
         if slug:
             cache_delete(f"cache:products:detail:{slug}")
+            cache_delete(f"cache:products:detail:v2:{slug}")

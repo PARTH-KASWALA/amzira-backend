@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -116,6 +118,10 @@ def test_product_detail_includes_rating_stock_and_variant_sku(client: TestClient
     product.is_exchange_eligible = True
     product.is_return_eligible = True
     product.return_window_hours = 36
+    product.marketplace_signal_label = "Marketplace top seller"
+    product.marketplace_signal_source = "Flipkart seller performance snapshot"
+    product.marketplace_signal_observed_at = datetime(2026, 9, 6, 14, 0, 0)
+    product.marketplace_signal_units = 3
     product.variants[0].measurements = {"chest": "14 in", "lehenga_length": "27 in"}
     db_session.commit()
 
@@ -133,6 +139,12 @@ def test_product_detail_includes_rating_stock_and_variant_sku(client: TestClient
     assert data["is_exchange_eligible"] is True
     assert data["variants"][0]["measurements"]["lehenga_length"] == "27 in"
     assert data["shipping_rate"] == 100.0
+    assert data["marketplace_signal"] == {
+        "label": "Marketplace top seller",
+        "source": "Flipkart seller performance snapshot",
+        "observed_at": "2026-09-06T14:00:00",
+        "units": 3,
+    }
 
 
 def test_delivery_estimate_endpoint_returns_shipping_and_dates(client: TestClient, db_session: Session):

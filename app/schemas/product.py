@@ -53,6 +53,15 @@ class ProductDefaultVariantResponse(BaseModel):
     stock_quantity: int
 
 
+class MarketplaceSignalResponse(BaseModel):
+    """A transparent marketplace sales observation, not a customer rating."""
+
+    label: str
+    source: str
+    observed_at: Optional[datetime] = None
+    units: Optional[int] = None
+
+
 class ProductListResponse(BaseModel):
     id: int
     name: str
@@ -64,6 +73,7 @@ class ProductListResponse(BaseModel):
     is_bestseller: bool = False
     is_most_loved: bool = False
     is_new_arrival: bool = False
+    marketplace_signal: Optional[MarketplaceSignalResponse] = None
     collection: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     stock_quantity: int

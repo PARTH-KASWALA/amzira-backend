@@ -54,6 +54,26 @@ def _deserialize_tags(value: str | None) -> list[str]:
         return []
 
 
+def _marketplace_signal(product: Product) -> dict | None:
+    """Expose only a dated, source-labelled seller-performance observation.
+
+    Marketplace ratings and review text are deliberately not carried through
+    this payload: AMZIRA may only publish those after the relevant reuse and
+    customer-consent checks have been completed.
+    """
+    if not product.marketplace_signal_label or not product.marketplace_signal_source:
+        return None
+
+    return {
+        "label": product.marketplace_signal_label,
+        "source": product.marketplace_signal_source,
+        "observed_at": product.marketplace_signal_observed_at.isoformat()
+        if product.marketplace_signal_observed_at
+        else None,
+        "units": product.marketplace_signal_units,
+    }
+
+
 def build_products_count_cache_key(request: Request) -> str:
     filtered_params = [
         (key, value)
@@ -307,6 +327,7 @@ def serialize_product_summary(product: Product) -> dict:
         "is_bestseller": product.is_bestseller,
         "is_most_loved": product.is_most_loved,
         "is_new_arrival": product.is_new_arrival,
+        "marketplace_signal": _marketplace_signal(product),
         "collection": product.collection,
         "tags": _deserialize_tags(product.tags),
         "stock_quantity": stock_quantity,
@@ -348,7 +369,7 @@ def list_products(
     sort_by: str | None = None,
     **filters,
 ) -> dict:
-    cache_key = f"cache:products:list:{request.url.path}?{request.url.query}"
+    cache_key = f"cache:products:list:v2:{request.url.path}?{request.url.query}"
     cached = cache_get_json(cache_key)
     if cached:
         return cached
@@ -375,7 +396,7 @@ def get_product_detail(
     free_shipping_threshold: float | None = None,
     default_shipping_charge: float | None = None,
 ) -> dict:
-    cache_key = f"cache:products:detail:{slug}"
+    cache_key = f"cache:products:detail:v2:{slug}"
     cached = cache_get_json(cache_key)
     if cached:
         return cached
@@ -413,6 +434,7 @@ def get_product_detail(
         "is_bestseller": product.is_bestseller,
         "is_most_loved": product.is_most_loved,
         "is_new_arrival": product.is_new_arrival,
+        "marketplace_signal": _marketplace_signal(product),
         "collection": product.collection,
         "tags": _deserialize_tags(product.tags),
         "total_stock": product.total_stock,

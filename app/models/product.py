@@ -68,6 +68,16 @@ class Product(Base):
     is_bestseller = Column(Boolean, default=False, nullable=False)
     is_most_loved = Column(Boolean, default=False, nullable=False)
     is_new_arrival = Column(Boolean, default=False, nullable=False)
+
+    # A dated seller-performance observation is intentionally separate from
+    # AMZIRA bestseller / review claims. It makes marketplace demand auditable
+    # without relabelling a short-lived sales snapshot as customer sentiment.
+    marketplace_signal_label = Column(String(80), nullable=True)
+    marketplace_signal_source = Column(String(120), nullable=True)
+    marketplace_signal_observed_at = Column(DateTime, nullable=True)
+    marketplace_signal_units = Column(Integer, nullable=True)
+    marketplace_signal_evidence_ref = Column(String(255), nullable=True)
+    marketplace_signal_match_method = Column(String(40), nullable=True)
     
     # Ratings
     avg_rating = Column(Float, default=0.0, nullable=False)
