@@ -59,6 +59,7 @@ def test_marketplace_review_import_keeps_source_and_media_consent(db_session: Se
     assert review.source == "myntra"
     assert review.verified_purchase is False
     assert review.marketplace_verified_purchase is True
+    assert review.source_listing_url == "https://www.myntra.com/example/ETHZY-42"
     assert review.media[0].media_url.endswith("42.webp")
     assert review.media[0].is_published is True
     assert product.review_count == 1

@@ -79,6 +79,7 @@ class ReviewService:
             verified_purchase=review.verified_purchase,
             marketplace_verified_purchase=review.marketplace_verified_purchase,
             source=review.source,
+            source_listing_url=review.source_listing_url if review.marketplace_verified_purchase else None,
             created_at=review.created_at,
             user_name=review.reviewer_name or user_name or "AMZIRA customer",
             media=[

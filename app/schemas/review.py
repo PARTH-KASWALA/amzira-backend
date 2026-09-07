@@ -102,6 +102,7 @@ class ReviewResponse(BaseModel):
     verified_purchase: bool
     marketplace_verified_purchase: bool = False
     source: str = "amzira"
+    source_listing_url: Optional[str] = None
     created_at: datetime
     user_name: str  # Full name of the reviewer
     media: List[ReviewMediaResponse] = Field(default_factory=list)
