@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import HTTPException, Request, status
 from sqlalchemy import and_, func, or_
@@ -26,6 +26,12 @@ def _is_front_view(image) -> bool:
     return bool(re.search(r"(?:^|[^a-z])front(?:[^a-z]|$)", label))
 
 
+def _is_back_view(image) -> bool:
+    """Return whether catalog metadata identifies an image as the back view."""
+    label = f"{image.alt_text or ''} {image.image_url or ''}".lower()
+    return bool(re.search(r"(?:^|[^a-z])back(?:[^a-z]|$)", label))
+
+
 def _ordered_product_images(images):
     """Keep front view first, then honor the explicit primary/display order metadata."""
     return sorted(
@@ -41,7 +47,68 @@ def _ordered_product_images(images):
 
 def _primary_image_url(images):
     ordered_images = _ordered_product_images(images)
-    return ordered_images[0].image_url if ordered_images else None
+    return _public_catalog_image_url(ordered_images[0].image_url) if ordered_images else None
+
+
+def _public_catalog_image_url(image_url: str | None) -> str | None:
+    """Expose imported catalog media on its public storefront origin.
+
+    The initial catalog import stored local development URLs in PostgreSQL.
+    Those URLs are useful on a laptop but make the production API, Merchant
+    Center, and crawlers try to fetch ``localhost:8000``. The same catalog
+    files are published by the storefront under ``/images/catalog``; rewrite
+    only that known legacy shape and leave all other image URLs untouched.
+    """
+    if not image_url:
+        return image_url
+
+    parsed = urlsplit(image_url)
+    catalog_prefix = "/static/uploads/products/catalog/"
+    if parsed.path.startswith(catalog_prefix) and parsed.hostname in {None, "localhost", "127.0.0.1"}:
+        relative_path = parsed.path[len(catalog_prefix):].lstrip("/")
+        if relative_path:
+            return f"{settings.FRONTEND_URL.rstrip('/')}/images/catalog/{relative_path}"
+
+    return image_url
+
+
+def _serialize_catalog_image(image) -> dict:
+    return {
+        "id": image.id,
+        "image_url": _public_catalog_image_url(image.image_url),
+        "alt_text": image.alt_text,
+        "display_order": image.display_order,
+        "is_primary": image.is_primary,
+    }
+
+
+def _catalog_card_images(images) -> list[dict]:
+    """Return the front and named back view needed for a product card.
+
+    Listing payloads deliberately remain small: the PDP keeps the complete
+    gallery, while the card only needs the customer-facing front/back turn.
+    """
+    ordered_images = _ordered_product_images(images)
+    if not ordered_images:
+        return []
+
+    front = ordered_images[0]
+    back = next((image for image in ordered_images if image.id != front.id and _is_back_view(image)), None)
+    selected_images = [front, back] if back else [front]
+    return [_serialize_catalog_image(image) for image in selected_images]
+
+
+def _serialize_variant(variant: ProductVariant) -> dict:
+    return {
+        "id": variant.id,
+        "size": variant.size,
+        "color": variant.color,
+        "sku": variant.sku,
+        "stock_quantity": variant.stock_quantity,
+        "additional_price": variant.additional_price,
+        "is_active": variant.is_active,
+        "measurements": variant.measurements,
+    }
 
 
 def _deserialize_tags(value: str | None) -> list[str]:
@@ -338,6 +405,11 @@ def serialize_product_summary(product: Product) -> dict:
         "tags": _deserialize_tags(product.tags),
         "stock_quantity": stock_quantity,
         "default_variant": default_variant,
+        # Quick view needs every size and the catalog needs just the named
+        # back view. Exposing these compact records avoids a per-card detail
+        # request while keeping the complete PDP gallery out of list payloads.
+        "variants": [_serialize_variant(variant) for variant in active_variants],
+        "images": _catalog_card_images(product.images),
         "category": {
             "id": product.category.id,
             "name": product.category.name,
@@ -375,7 +447,7 @@ def list_products(
     sort_by: str | None = None,
     **filters,
 ) -> dict:
-    cache_key = f"cache:products:list:v2:{request.url.path}?{request.url.query}"
+    cache_key = f"cache:products:list:v3:{request.url.path}?{request.url.query}"
     cached = cache_get_json(cache_key)
     if cached:
         return cached
@@ -473,7 +545,7 @@ def get_product_detail(
         "images": [
             {
                 "id": img.id,
-                "image_url": img.image_url,
+                "image_url": _public_catalog_image_url(img.image_url),
                 "alt_text": img.alt_text,
                 "display_order": img.display_order,
                 "is_primary": img.is_primary,
@@ -481,16 +553,7 @@ def get_product_detail(
             for img in _ordered_product_images(product.images)
         ],
         "variants": [
-            {
-                "id": variant.id,
-                "size": variant.size,
-                "color": variant.color,
-                "sku": variant.sku,
-                "stock_quantity": variant.stock_quantity,
-                "additional_price": variant.additional_price,
-                "is_active": variant.is_active,
-                "measurements": variant.measurements,
-            }
+            _serialize_variant(variant)
             for variant in product.variants if variant.is_active
         ],
         "occasions": [
